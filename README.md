@@ -46,6 +46,10 @@ Devin 常规应用更新不会覆盖用户扩展目录。扩展每次启动重�
 
 已经启动的会话沿用启动时的环境；停用后请新建会话使用原生配置。本地服务不会因关闭一个窗口或卸载而强行终止正在进行的请求。
 
+## 友情链接
+
+作者活跃于 [LINUX DO · @koubibulaien](https://linux.do/u/koubibulaien)，欢迎交流。
+
 ## 开发
 
 `npm test` 运行协议和运行时测试。`npm run package` 生成无外部运行时依赖的 VSIX。
