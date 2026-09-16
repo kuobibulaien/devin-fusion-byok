@@ -1,0 +1,59 @@
+{
+  "name": "devin-fusion-byok",
+  "displayName": "Devin Fusion BYOK",
+  "description": "Import OpenAI-compatible models into Devin Local and native Fusion through runtime bridges.",
+  "version": "0.3.10",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./src/extension.cjs",
+  "activationEvents": [
+    "*"
+  ],
+  "extensionKind": [
+    "ui"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.cjs",
+    "package": "node scripts/package.cjs",
+    "vscode:uninstall": "node src/lifecycle/uninstall.cjs"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "devinFusionByok.openPanel",
+        "title": "Fusion BYOK：控制面板"
+      },
+      {
+        "command": "devinFusionByok.configure",
+        "title": "Fusion BYOK：配置第三方 API"
+      },
+      {
+        "command": "devinFusionByok.refreshModels",
+        "title": "Fusion BYOK：选择模型导入"
+      },
+      {
+        "command": "devinFusionByok.selectFusion",
+        "title": "Fusion BYOK：选择 Lead 和 Sidekick"
+      },
+      {
+        "command": "devinFusionByok.status",
+        "title": "Fusion BYOK：查看状态"
+      },
+      {
+        "command": "devinFusionByok.disable",
+        "title": "Fusion BYOK：停用并恢复连接"
+      }
+    ]
+  }
+}
