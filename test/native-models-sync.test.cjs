@@ -152,8 +152,8 @@ test('createManager.ready hydrates panel state from a synced backend with zero L
     assert.ok(row, uid + ' must appear in the panel official list');
     assert.equal(row.eligible, true, uid + ' must be eligible via backend observations');
   }
-  assert.equal(state.nativeModels.find(entry => entry.uid === 'swe-2-max')?.eligible, false);
-  assert.equal(state.nativeModels.find(entry => entry.uid === 'gpt-5-6-luna-high-priority')?.eligible, false);
+  assert.equal(state.nativeModels.find(entry => entry.uid === 'swe-2-max')?.eligible, true);
+  assert.equal(state.nativeModels.find(entry => entry.uid === 'gpt-5-6-luna-high-priority')?.eligible, true);
   const built = buildCatalog(saved, backendModels);
   const nativeCombos = Object.values(built.fusions).filter(fusion => fusion.sidekickNative);
   assert.equal(nativeCombos.length, 0, 'hydration offers candidates without generating unsaved combinations');

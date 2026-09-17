@@ -388,8 +388,8 @@ test('native model hide and restore persist a validated exclusion list with obse
   const f = memory({ nativeModels: () => observed });
   let state = await f.manager.dispatch('ready');
   assert.deepEqual(state.nativeModels, [
-    { uid: 'swe-2-max', label: 'Official SWE', disabled: false, hidden: false, eligible: false },
-    { uid: 'claude-x', label: 'Claude X', disabled: true, hidden: false, eligible: false },
+    { uid: 'swe-2-max', label: 'Official SWE', disabled: false, hidden: false, eligibleLead: false, eligibleSidekick: false, eligible: false },
+    { uid: 'claude-x', label: 'Claude X', disabled: true, hidden: false, eligibleLead: false, eligibleSidekick: false, eligible: false },
   ]);
   state = await f.manager.dispatch('setNativeModelHidden', { uid: 'swe-2-max', hidden: true });
   assert.deepEqual(f.read().hiddenNativeModelUids, ['swe-2-max']);
@@ -459,7 +459,7 @@ test('observed native Sidekick eligibility drives state flags, combinations and 
   ];
   const f = memory({ nativeModels: () => observed });
   const state = await f.manager.dispatch('ready');
-  assert.deepEqual(state.nativeModels.filter(entry => entry.eligible).map(entry => entry.uid).sort(), ['swe-2-max', 'swe-2-medium']);
+  assert.deepEqual(state.nativeModels.filter(entry => entry.eligible).map(entry => entry.uid).sort(), ['swe-2-max', 'swe-2-medium', 'swe-other-harness']);
   assert.equal(state.nativeModels.find(entry => entry.uid === 'swe-naked').eligible, false);
   const catalog = assertValidGraph(f.read(), observed);
   assert.equal(Object.keys(catalog.fusions).length, 0);
@@ -467,7 +467,9 @@ test('observed native Sidekick eligibility drives state flags, combinations and 
   assert.equal(created.fusionCount, 1);
   await f.manager.dispatch('setSidekicks', { sidekicks: [{ nativeUid: 'swe-2-medium' }] });
   assert.deepEqual(f.read().sidekicks, [{ nativeUid: 'swe-2-medium', label: 'SWE-2 Medium' }]);
-  for (const uid of ['swe-disabled', 'swe-router', 'swe-naked', 'swe-other-harness', 'swe-never-seen']) {
+  await f.manager.dispatch('setSidekicks', { sidekicks: [{ nativeUid: 'swe-other-harness' }] });
+  assert.deepEqual(f.read().sidekicks, [{ nativeUid: 'swe-other-harness', label: 'Other' }]);
+  for (const uid of ['swe-disabled', 'swe-router', 'swe-naked', 'swe-never-seen']) {
     await assert.rejects(f.manager.dispatch('setSidekicks', { sidekicks: [{ nativeUid: uid }] }), PanelInputError, uid);
   }
 });
@@ -494,7 +496,7 @@ test('cleanSidekicks drops malformed entries without throwing', () => {
   assert.ok(!input.sidekicks.some(sidekick => sidekick.providerId === 'ghost'));
 });
 
-test('an officially paired native is offered and accepted; unpaired unfamiliar harnesses stay excluded', () => {
+test('officially paired and standalone unlocked natives are offered and accepted', () => {
   const observed = [
     { uid: 'gpt-5-6-luna-high', label: 'GPT-5.6 Luna High Thinking', disabled: false, isModelRouter: false, harnessUids: ['gpt-5p6'] },
     { uid: 'swe-odd', label: 'Odd', disabled: false, isModelRouter: false, harnessUids: ['odd-harness'] },
@@ -504,11 +506,13 @@ test('an officially paired native is offered and accepted; unpaired unfamiliar h
   const f = memory({ nativeModels: () => observed });
   const state = publicState(fixture(), '', observed);
   assert.equal(state.nativeModels.find(entry => entry.uid === 'gpt-5-6-luna-high').eligible, true);
-  assert.equal(state.nativeModels.find(entry => entry.uid === 'swe-odd').eligible, false,
-    'an unfamiliar harness without an enabled official pairing stays ineligible');
+  assert.equal(state.nativeModels.find(entry => entry.uid === 'swe-odd').eligible, true,
+    'an unlocked standalone native is eligible for named presets');
   assert.ok(state.sidekicks.some(item => item.nativeUid === 'gpt-5-6-luna-high'));
   return f.manager.dispatch('setSidekicks', { sidekicks: [{ nativeUid: 'gpt-5-6-luna-high' }] }).then(async next => {
     assert.ok(next.sidekicks.some(item => item.nativeUid === 'gpt-5-6-luna-high'));
-    await assert.rejects(f.manager.dispatch('setSidekicks', { sidekicks: [{ nativeUid: 'swe-odd' }] }), PanelInputError);
+    await f.manager.dispatch('setSidekicks', { sidekicks: [{ nativeUid: 'swe-odd' }] });
+    const disabled = observed.map(item => item.uid === 'swe-odd' ? { ...item, disabled: true } : item);
+    assert.equal(publicState(fixture(), '', disabled).nativeModels.find(entry => entry.uid === 'swe-odd').eligible, false);
   });
 });

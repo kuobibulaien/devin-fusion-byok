@@ -217,7 +217,7 @@ test('a saved native Sidekick preference alone never grants capability without o
   assert.equal(f.forwarded.at(-1).target, 'https://server.codeium.com' + API + 'AssignModel');
 });
 
-test('an officially paired native Sidekick assigns its declared harness, an unpaired one stays closed', async t => {
+test('officially paired and standalone native Sidekicks assign declared harnesses', async t => {
   const f = await fixture(t);
   const observed = [
     { uid: 'gpt-5-6-luna-high', label: 'GPT-5.6 Luna High Thinking', disabled: false, isModelRouter: false, harnessUids: ['gpt-5p6'] },
@@ -230,8 +230,9 @@ test('an officially paired native Sidekick assigns its declared harness, an unpa
   const built = buildCatalog(f.config, observed);
   const luna = Object.values(built.fusions).find(fusion => fusion.sidekickUid === 'gpt-5-6-luna-high');
   assert.ok(luna, 'enabled official pairing makes the unfamiliar-harness native eligible');
-  assert.equal(Object.values(built.fusions).find(fusion => fusion.sidekickUid === 'swe-odd'), undefined,
-    'a disabled pairing leaves an unfamiliar-harness native ineligible');
+  const odd = Object.values(built.fusions).find(fusion => fusion.sidekickUid === 'swe-odd');
+  assert.ok(odd, 'an unlocked standalone native is eligible for named presets');
+  assert.deepEqual(odd.sidekickHarnessUids, ['odd-harness']);
   f.setNatives(observed);
   await fetch(f.base + API + 'GetCliModelConfigs', { method: 'POST', body: 'native' });
   const resolved = await fetch(f.base + API + 'AssignModel', { method: 'POST', headers: { 'content-type': 'application/json' },
@@ -239,4 +240,17 @@ test('an officially paired native Sidekick assigns its declared harness, an unpa
   const data = JSON.parse(await resolved.text());
   assert.equal(data.assignment.modelUid, 'gpt-5-6-luna-high');
   assert.deepEqual(data.assignment.harnessUids, ['gpt-5p6'], 'the declared official harness is forwarded exactly');
+  const firstProvider = f.config.providers.find(provider => provider.enabled !== false && provider.models?.some(model => model.enabled !== false));
+  const firstModel = firstProvider.models.find(model => model.enabled !== false);
+  f.config.fusionPresets = [{ id: 'odd', name: 'Odd', lead: { providerId: firstProvider.id, model: firstModel.id }, sidekick: { nativeUid: 'swe-odd' } }];
+  fs.writeFileSync(path.join(f.root, 'config.json'), JSON.stringify(f.config));
+  const oddPreset = Object.values(buildCatalog(f.config, observed).fusions).find(fusion => fusion.sidekickUid === 'swe-odd');
+  assert.ok(oddPreset);
+  const oddResolved = await fetch(f.base + API + 'AssignModel', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ modelRouterUid: oddPreset.uid, fusionLeadRouterUid: oddPreset.uid }) });
+  const oddData = JSON.parse(await oddResolved.text());
+  assert.equal(oddData.assignment.modelUid, 'swe-odd');
+  assert.deepEqual(oddData.assignment.harnessUids, ['odd-harness']);
+  const disabled = observed.map(item => item.uid === 'swe-odd' ? { ...item, disabled: true } : item);
+  assert.equal(Object.values(buildCatalog(f.config, disabled).fusions).some(fusion => fusion.sidekickUid === 'swe-odd'), false);
 });

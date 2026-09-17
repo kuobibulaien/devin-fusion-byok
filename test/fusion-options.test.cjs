@@ -77,19 +77,23 @@ test('actual installed Fusion picker enables every GPT effort and imported Sidek
 });
 
 test('selective import immediately exposes the new model in both roles and effort settings are editable', async () => {
-  let current = { providers: [{ id: 'load', name: 'load', models: [] }], sidekicks: [{ nativeUid: 'swe-2-max' }] };
+  let current = { providers: [{ id: 'load', name: 'load', models: [] }], sidekicks: [{ nativeUid: 'swe-2-max' }],
+    roleInclusions: { lead: [{ nativeUid: 'swe-2-max' }], sidekick: [] } };
   const manager = createManager({ read: () => structuredClone(current), write: c => { current = c; },
     discover: async p => { p.models = [{ id: 'gpt-6-astra', efforts: [] }] }, nativeModels: () => OBSERVED_SWE });
   const preview = await manager.dispatch('refreshModels', { providerId: 'load' });
   assert.equal(preview.fusionCount, 0);
   const imported = await manager.dispatch('importModels', { providerId: 'load', token: preview.importCandidates.token, ids: ['gpt-6-astra'] });
   assert.equal(imported.fusionCount, 0);
-  assert.equal(imported.presetCandidates.lead.length, 5);
+  assert.equal(imported.presetCandidates.lead.filter(item => !item.ref.nativeUid).length, 5);
+  assert.ok(imported.presetCandidates.lead.some(item => item.ref.nativeUid === 'swe-2-max'));
   assert.ok(imported.sidekicks.some(s => s.providerId === 'load' && s.model === 'gpt-6-astra'));
   const custom = await manager.dispatch('updateModels', { providerId: 'load', changes: [{ id: 'gpt-6-astra', effortMode: 'manual', efforts: ['low', 'high'] }] });
   assert.equal(custom.fusionCount, 0);
-  assert.equal(custom.presetCandidates.lead.length, 2);
+  assert.equal(custom.presetCandidates.lead.filter(item => !item.ref.nativeUid).length, 2);
+  assert.ok(custom.presetCandidates.lead.some(item => item.ref.nativeUid === 'swe-2-max'));
   const providerDefault = await manager.dispatch('updateModels', { providerId: 'load', changes: [{ id: 'gpt-6-astra', effortMode: 'none' }] });
   assert.equal(providerDefault.fusionCount, 0);
-  assert.equal(providerDefault.presetCandidates.lead.length, 1);
+  assert.equal(providerDefault.presetCandidates.lead.filter(item => !item.ref.nativeUid).length, 1);
+  assert.ok(providerDefault.presetCandidates.lead.some(item => item.ref.nativeUid === 'swe-2-max'));
 });

@@ -48,17 +48,20 @@ function cleanSidekicks(config) {
 function publicState(config, selectedFusionUid, nativeModels = [], autoContinueStatus = 'unavailable') {
   const catalog = buildCatalog({ ...config, enabled: true }, nativeModels);
   const hidden = new Set(catalog.hiddenNativeModelUids || []);
-  const eligible = new Set(catalog.sidekicks.filter(sidekick => sidekick.native).map(sidekick => sidekick.uid));
+  const roleLists = buildRoleLists(config, nativeModels);
+  const eligibleLeads = new Set(roleLists.lead.filter(item => item.available).map(item => item.ref.nativeUid).filter(Boolean));
+  const eligibleSidekicks = new Set(roleLists.sidekick.filter(item => item.available).map(item => item.ref.nativeUid).filter(Boolean));
   const observed = new Set();
   const natives = [];
   for (const entry of nativeModels) {
     if (!entry || typeof entry.uid !== 'string' || !entry.uid) continue;
     observed.add(entry.uid);
     natives.push({ uid: entry.uid, label: typeof entry.label === 'string' && entry.label ? entry.label : entry.uid,
-      disabled: entry.disabled === true, hidden: hidden.has(entry.uid), eligible: eligible.has(entry.uid) });
+      disabled: entry.disabled === true, hidden: hidden.has(entry.uid),
+      eligibleLead: eligibleLeads.has(entry.uid), eligibleSidekick: eligibleSidekicks.has(entry.uid),
+      eligible: eligibleLeads.has(entry.uid) || eligibleSidekicks.has(entry.uid) });
   }
-  for (const uid of hidden) if (!observed.has(uid)) natives.push({ uid, label: uid, disabled: false, hidden: true, eligible: false });
-  const roleLists = buildRoleLists(config, nativeModels);
+  for (const uid of hidden) if (!observed.has(uid)) natives.push({ uid, label: uid, disabled: false, hidden: true, eligibleLead: false, eligibleSidekick: false, eligible: false });
   return {
     enabled: config.enabled !== false,
     providers: config.providers.map(provider => ({ id: provider.id, name: provider.name, baseUrl: provider.baseUrl,
@@ -199,12 +202,12 @@ function createManager({ read, write, discover = discoverModels, afterChange = a
       }
       case 'setSidekicks': {
         if (!Array.isArray(payload.sidekicks)) fail('Sidekick 列表无效。');
-        const eligibleNatives = new Map(buildCatalog({ ...config, sidekicks: [] }, nativeModels()).sidekicks.filter(item => item.native).map(item => [item.uid, item]));
+        const eligibleNatives = new Map(buildRoleLists(config, nativeModels()).sidekick.filter(item => item.native && item.available).map(item => [item.ref.nativeUid, item]));
         config.sidekicks = payload.sidekicks.map(sidekick => {
           if (sidekick && typeof sidekick.nativeUid === 'string') {
             const native = eligibleNatives.get(sidekick.nativeUid);
             if (!native) fail('该官方模型当前不可用作 Sidekick，请刷新目录后重试。');
-            return { nativeUid: native.uid, label: native.label };
+            return { nativeUid: native.ref.nativeUid, label: native.label };
           }
           const provider = providerAt(config, sidekick?.providerId);
           if (provider.enabled === false || !provider.models.some(m => m.id === sidekick.model && m.enabled !== false)) fail('Sidekick 必须是已启用的模型。');
@@ -245,11 +248,17 @@ function createManager({ read, write, discover = discoverModels, afterChange = a
 
         if (!config.roleExclusions) config.roleExclusions = { lead: [], sidekick: [] };
         if (!Array.isArray(config.roleExclusions[role])) config.roleExclusions[role] = [];
+        if (!config.roleInclusions) config.roleInclusions = { lead: [], sidekick: [] };
+        if (!Array.isArray(config.roleInclusions[role])) config.roleInclusions[role] = [];
 
         const refToStore = hasNative ? { nativeUid: model.nativeUid } : { providerId: model.providerId, model: model.model };
         if (enabled) {
           config.roleExclusions[role] = config.roleExclusions[role].filter(r => refKey(r) !== key);
+          if (hasNative && !config.roleInclusions[role].some(r => refKey(r) === key)) {
+            config.roleInclusions[role].push(refToStore);
+          }
         } else {
+          config.roleInclusions[role] = config.roleInclusions[role].filter(r => refKey(r) !== key);
           if (!config.roleExclusions[role].some(r => refKey(r) === key)) {
             config.roleExclusions[role].push(refToStore);
           }

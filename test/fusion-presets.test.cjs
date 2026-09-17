@@ -177,3 +177,148 @@ test('ambiguous references, duplicate persisted names and invalid efforts fail c
   const input = config(); input.fusionPresets = [preset(), preset('two')];
   assert.equal(Object.keys(buildCatalog(input).fusions).length, 0);
 });
+
+test('standalone unlocked native models are candidates without official Fusion rows', async () => {
+  const native = { uid: 'standalone-swe', label: 'Standalone SWE', disabled: false, isModelRouter: false, harnessUids: ['swe-standalone'] };
+  const input = config();
+  const roles = require('../src/catalog.cjs').buildRoleLists(input, [native]);
+  const leadRow = roles.lead.find(item => item.ref.nativeUid === native.uid);
+  const sidekickRow = roles.sidekick.find(item => item.ref.nativeUid === native.uid);
+  assert.equal(leadRow.available, true);
+  assert.equal(leadRow.selected, false);
+  assert.equal(sidekickRow.available, true);
+  assert.equal(sidekickRow.selected, false);
+  const catalog = buildCatalog(input, [native]);
+  assert.equal(catalog.presetCandidates.lead.some(item => item.ref.nativeUid === native.uid), false);
+  assert.equal(catalog.presetCandidates.sidekick.some(item => item.ref.nativeUid === native.uid), false);
+  input.roleInclusions = { lead: [{ nativeUid: native.uid }], sidekick: [{ nativeUid: native.uid }] };
+  const included = buildCatalog(input, [native]);
+  assert.deepEqual(included.presetCandidates.lead.find(item => item.ref.nativeUid === native.uid).ref, { nativeUid: native.uid });
+  assert.deepEqual(included.presetCandidates.sidekick.find(item => item.ref.nativeUid === native.uid).ref, { nativeUid: native.uid });
+  input.fusionPresets = [preset('mixed', '混合', ref('a', 'high'), { nativeUid: native.uid }),
+    preset('native', '原生', { nativeUid: native.uid }, { nativeUid: native.uid })];
+  const mixed = buildCatalog(input, [native]);
+  assert.deepEqual(mixed.fusions[presetUid('mixed')].sidekickHarnessUids, native.harnessUids);
+  assert.deepEqual(mixed.fusions[presetUid('native')].leadHarnessUids, ['fusion', 'swe-standalone']);
+  assert.deepEqual(resolveAssignment({ modelRouterUid: presetUid('native') }, { json: true }, mixed).assignment.harnessUids,
+    ['fusion', 'swe-standalone']);
+  const managerConfig = { ...input, fusionPresets: [] };
+  const manager = createManager({ read: () => structuredClone(managerConfig), write: next => Object.assign(managerConfig, next), nativeModels: () => [native] });
+  const state = await manager.dispatch('saveFusionPreset', { name: '再次保存', lead: { nativeUid: native.uid }, sidekick: { nativeUid: native.uid } });
+  assert.equal(state.fusionPresets.some(item => item.name === '再次保存'), true);
+});
+
+test('standalone duplicate eligibility conflicts fail closed while identical records remain eligible', () => {
+  const base = { uid: 'duplicate-native', label: 'Duplicate', disabled: false, isModelRouter: false, harnessUids: ['native-harness'] };
+  for (const contradictory of [
+    { disabled: true, isModelRouter: false, harnessUids: ['native-harness'] },
+    { disabled: false, isModelRouter: true, harnessUids: ['native-harness'] },
+    { disabled: false, isModelRouter: false, harnessUids: [] },
+    { disabled: false, isModelRouter: false, harnessUids: ['different'] },
+    { disabled: false, isModelRouter: false, harnessUids: ['   '] },
+  ]) {
+    for (const order of [[base, { ...base, ...contradictory }], [{ ...base, ...contradictory }, base]]) {
+      const input = config();
+      input.roleInclusions = { lead: [{ nativeUid: base.uid }], sidekick: [{ nativeUid: base.uid }] };
+      const catalog = buildCatalog(input, order);
+      assert.equal(catalog.presetCandidates.lead.some(item => item.ref.nativeUid === base.uid), false);
+      assert.equal(catalog.presetCandidates.sidekick.some(item => item.ref.nativeUid === base.uid), false);
+    }
+  }
+  const input = config();
+  input.roleInclusions = { lead: [{ nativeUid: base.uid }], sidekick: [{ nativeUid: base.uid }] };
+  const candidates = buildCatalog(input, [base, { ...base }]).presetCandidates;
+  assert.equal(candidates.lead.filter(item => item.ref.nativeUid === base.uid).length, 1);
+  assert.equal(candidates.sidekick.filter(item => item.ref.nativeUid === base.uid).length, 1);
+});
+
+test('standalone native candidates preserve filtering and role-specific exclusions', () => {
+  const valid = { uid: 'valid-native', label: 'Valid', disabled: false, isModelRouter: false, harnessUids: ['native-harness'] };
+  const entries = [valid,
+    { uid: 'disabled-native', label: 'Disabled', disabled: true, isModelRouter: false, harnessUids: ['h'] },
+    { uid: 'router-native', label: 'Router', disabled: false, isModelRouter: true, harnessUids: ['h'] },
+    { uid: 'bad-harness', label: 'Bad', disabled: false, isModelRouter: false, harnessUids: [] },
+    { uid: 'fusion-router', label: 'Fusion', disabled: false, isModelRouter: false, harnessUids: ['h'] },
+    { uid: 'malformed-harness', label: 'Malformed', disabled: false, isModelRouter: false, harnessUids: [''] },
+  ];
+  const input = config(); input.hiddenNativeModelUids = ['valid-native'];
+  input.roleInclusions = { lead: [{ nativeUid: valid.uid }], sidekick: [{ nativeUid: valid.uid }] };
+  let catalog = buildCatalog(input, entries);
+  assert.equal(catalog.presetCandidates.lead.some(item => item.ref.nativeUid), false);
+  input.hiddenNativeModelUids = [];
+  input.roleExclusions = { lead: [{ nativeUid: valid.uid }], sidekick: [] };
+  catalog = buildCatalog(input, entries);
+  assert.equal(catalog.presetCandidates.lead.some(item => item.ref.nativeUid === valid.uid), false);
+  assert.equal(catalog.presetCandidates.sidekick.some(item => item.ref.nativeUid === valid.uid), true);
+  input.roleInclusions = { lead: [{ nativeUid: 'disabled-native' }, { nativeUid: 'fusion-router' }], sidekick: input.roleInclusions.sidekick };
+  catalog = buildCatalog(input, entries);
+  assert.equal(catalog.presetCandidates.lead.some(item => item.ref.nativeUid === 'disabled-native'), false);
+  assert.equal(catalog.presetCandidates.lead.some(item => item.ref.nativeUid === 'fusion-router'), false);
+});
+
+test('manager saves all native/imported preset shapes with exact JSON and protobuf assignments', async () => {
+  const native = { uid: 'standalone-swe', label: 'Standalone SWE', disabled: false, isModelRouter: false, harnessUids: ['native-harness'] };
+  const managerConfig = config(); managerConfig.fusionPresets = [];
+  managerConfig.roleInclusions = { lead: [{ nativeUid: native.uid }], sidekick: [{ nativeUid: native.uid }] };
+  const manager = createManager({ read: () => structuredClone(managerConfig), write: next => Object.assign(managerConfig, next), nativeModels: () => [native] });
+  const nativeRef = { nativeUid: native.uid };
+  const pairs = [[ref('a', 'high'), nativeRef], [nativeRef, ref('b')], [nativeRef, nativeRef]];
+  for (const [lead, sidekick] of pairs) await manager.dispatch('saveFusionPreset', { name: JSON.stringify([lead, sidekick]), lead, sidekick });
+  const catalog = buildCatalog(managerConfig, [native]);
+  for (const fusion of Object.values(catalog.fusions)) {
+    const jsonLead = resolveAssignment({ modelRouterUid: fusion.uid }, { json: true }, catalog).assignment;
+    const jsonSide = resolveAssignment({ modelRouterUid: fusion.uid, fusionLeadRouterUid: fusion.uid }, { json: true }, catalog).assignment;
+    assert.equal(jsonLead.modelUid, fusion.leadUid); assert.equal(jsonSide.modelUid, fusion.sidekickUid);
+    if (fusion.leadNative) assert.deepEqual(jsonLead.harnessUids, fusion.leadHarnessUids);
+    if (fusion.sidekickNative) assert.deepEqual(jsonSide.harnessUids, fusion.sidekickHarnessUids);
+    const protoLead = resolveAssignment(s(2, fusion.uid), {}, catalog);
+    const protoSide = resolveAssignment(Buffer.concat([s(2, fusion.uid), s(6, fusion.uid)]), {}, catalog);
+    assert.equal(str(fields(protoLead, 1)[0].value, 2), fusion.leadUid);
+    assert.equal(str(fields(protoSide, 1)[0].value, 2), fusion.sidekickUid);
+  }
+});
+
+test('opt-in role switches persist, stay role-specific and explicit off beats saved presets', async () => {
+  const native = { uid: 'optin-native', label: 'OptIn', disabled: false, isModelRouter: false, harnessUids: ['optin-harness'] };
+  const managerConfig = config(); managerConfig.fusionPresets = [];
+  const manager = createManager({ read: () => structuredClone(managerConfig), write: next => Object.assign(managerConfig, next), nativeModels: () => [native] });
+  await manager.dispatch('setRoleModel', { role: 'sidekick', model: { nativeUid: native.uid }, enabled: true });
+  assert.deepEqual(managerConfig.roleInclusions, { lead: [], sidekick: [{ nativeUid: native.uid }] });
+  let catalog = buildCatalog(managerConfig, [native]);
+  assert.equal(catalog.presetCandidates.lead.some(item => item.ref.nativeUid === native.uid), false);
+  assert.equal(catalog.presetCandidates.sidekick.some(item => item.ref.nativeUid === native.uid), true);
+  const restarted = createManager({ read: () => structuredClone(managerConfig), write: next => Object.assign(managerConfig, next), nativeModels: () => [] });
+  const missing = restarted.state();
+  const row = missing.roleLists.sidekick.find(item => item.ref.nativeUid === native.uid);
+  assert.equal(row.selected, false);
+  assert.equal(row.explicitIncluded, true);
+  assert.equal(row.available, false);
+  const returned = createManager({ read: () => structuredClone(managerConfig), write: next => Object.assign(managerConfig, next), nativeModels: () => [native] });
+  const backRow = returned.state().roleLists.sidekick.find(item => item.ref.nativeUid === native.uid);
+  assert.equal(backRow.available, true);
+  assert.equal(backRow.selected, true);
+  managerConfig.fusionPresets = [preset('saved', '已保存', ref('a', 'high'), { nativeUid: native.uid })];
+  delete managerConfig.roleInclusions;
+  assert.equal(buildCatalog(managerConfig, [native]).presetCandidates.sidekick.some(item => item.ref.nativeUid === native.uid), true);
+  managerConfig.roleExclusions = { lead: [], sidekick: [{ nativeUid: native.uid }] };
+  catalog = buildCatalog(managerConfig, [native]);
+  assert.equal(catalog.presetCandidates.sidekick.some(item => item.ref.nativeUid === native.uid), false);
+  assert.equal(catalog.fusions[presetUid('saved')], undefined);
+});
+
+test('disabled providers and models are never selected or preset candidates', () => {
+  const input = config();
+  input.providers[0].models[0].enabled = false;
+  const roles = require('../src/catalog.cjs').buildRoleLists(input, []);
+  const leadRow = roles.lead.find(item => item.ref.model === 'a');
+  assert.equal(leadRow.available, false);
+  assert.equal(leadRow.selected, false);
+  const catalog = buildCatalog(input, []);
+  assert.equal(catalog.presetCandidates.lead.some(item => item.ref.model === 'a'), false);
+  assert.equal(catalog.presetCandidates.sidekick.some(item => item.ref.model === 'a'), false);
+  const off = config();
+  off.providers[0].enabled = false;
+  const catalog2 = buildCatalog(off, []);
+  assert.equal(catalog2.presetCandidates.lead.length, 0);
+  assert.equal(catalog2.presetCandidates.sidekick.length, 0);
+});

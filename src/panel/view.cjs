@@ -79,7 +79,14 @@ function renderPanel({ nonce, cspSource }) {
     .fusion-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; }
     .fusion-default-section { margin-bottom: 20px; }
     .section-hint { margin: 4px 0 10px; }
-    .sidekick-list { max-height: 200px; overflow: auto; margin-top: 8px; border: 1px solid var(--vscode-panel-border, #454545); border-radius: 4px; }
+    .sidekick-list { margin-top: 8px; border: 1px solid var(--vscode-panel-border, #454545); border-radius: 4px; }
+    .sidekick-list details { padding: 0; }
+    .sidekick-list summary { padding: 6px 9px; cursor: pointer; color: var(--vscode-descriptionForeground, #999); }
+    input.role-switch[type="checkbox"] { appearance: none; -webkit-appearance: none; width: 34px; height: 20px; border-radius: 10px; flex: none; margin: 0; position: relative; cursor: pointer; accent-color: auto; background: var(--vscode-input-background, #3c3c3c); border: 1px solid var(--vscode-panel-border, #454545); }
+    input.role-switch[type="checkbox"]::after { content: ''; position: absolute; top: 1px; left: 1px; width: 16px; height: 16px; border-radius: 50%; background: var(--vscode-foreground, #ddd); transition: left 0.12s ease; }
+    input.role-switch[type="checkbox"]:checked { background: var(--vscode-button-background, #0e639c); border-color: var(--vscode-button-background, #0e639c); }
+    input.role-switch[type="checkbox"]:checked::after { left: 15px; background: var(--vscode-button-foreground, #fff); }
+    input.role-switch[type="checkbox"]:disabled { opacity: 0.5; cursor: default; }
     .sidekick-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 9px; }
     .sidekick-row span { min-width: 0; overflow-wrap: anywhere; }
     .sidekick-row + .sidekick-row { border-top: 1px solid var(--vscode-panel-border, #454545); }
@@ -165,6 +172,7 @@ function panelClient(modelSupportsImages) {
   let leadSearch = '';
   let sidekickSearch = '';
   let nativeSearch = '';
+  const roleDetailsOpen = { lead: false, sidekick: false };
   let modelDraft = new Map();
   let modelButtons = [];
 
@@ -404,7 +412,7 @@ function panelClient(modelSupportsImages) {
     byId('fusion-count').textContent = (state.fusionCount || 0) + ' 个组合';
 
     const defaultSection = element('div', { class: 'fusion-default-section' }, element('h3', { text: '我的 Fusion 预设' }),
-      element('p', { class: 'hint section-hint', text: '只生成你保存的组合。每个预设以独立名称显示在原生模型列表最前面的“我的 Fusion”分组。下方角色列表只管理候选范围，不会自动配对。' }),
+      element('p', { class: 'hint section-hint', text: '只生成你保存的组合。每个预设以独立名称显示在原生模型列表最前面的“我的 Fusion”分组。下方角色列表只管理候选范围，保存后才会生成对应组合。' }),
       button('新建预设', () => presetDialog(), false));
     if (state.migrationPending) defaultSection.append(element('p', { class: 'subtle-warning', text: '原默认组合暂时无法还原，请等待官方目录同步，或新建自己的预设。' }));
     const presets = state.fusionPresets || [];
@@ -413,7 +421,7 @@ function panelClient(modelSupportsImages) {
       const selectButton = button(preset.uid === state.selectedFusionUid ? '已选择' : '选择', () =>
         run(() => request('selectFusion', { uid: preset.uid }), '正在选择预设…', '已记住该预设。也可以在原生模型列表直接切换。'), false);
       selectButton.disabled = !preset.available || state.enabled === false || preset.uid === state.selectedFusionUid;
-      const describe = (role, label) => label || preset[role]?.nativeUid || [preset[role]?.providerId, preset[role]?.model, preset[role]?.effort].filter(Boolean).join(' · ');
+      const describe = (role, label) => label || (preset[role]?.nativeUid ? '官方 · ' + preset[role].nativeUid : [preset[role]?.providerId, preset[role]?.model, preset[role]?.effort].filter(Boolean).join(' · '));
       defaultSection.append(element('div', { class: 'model-row' },
         element('div', { class: 'model-text' }, element('strong', { text: preset.name }),
           element('div', { class: 'hint', text: 'Lead: ' + describe('lead', preset.leadLabel) + ' / Sidekick: ' + describe('sidekick', preset.sidekickLabel) }),
@@ -459,7 +467,7 @@ function panelClient(modelSupportsImages) {
     if (state.enabled === false) defaultSection.append(element('p', { class: 'subtle-warning space-top', text: '插件当前已停用。启用后，导入的模型和 Fusion 组合才会出现在新会话中。' }));
 
     const leadSection = element('div', {}, element('h3', { text: 'Lead 模型' }),
-      element('p', { class: 'hint section-hint', text: '选择可作为主模型的导入模型与官方模型。移除仅排除该角色，不删除基础模型。' }));
+      element('p', { class: 'hint section-hint', text: '默认开启已导入模型和官方支持此角色的模型；其他官方模型可按需开启。预设只使用已开启项。' }));
     const leadInput = element('input', { type: 'search', placeholder: '搜索 Lead 模型', 'aria-label': '搜索 Lead 模型',
       oninput: event => { leadSearch = event.target.value; renderRoleRows('lead'); }
     });
@@ -467,7 +475,7 @@ function panelClient(modelSupportsImages) {
     leadSection.append(leadInput, element('div', { id: 'lead-role-list', class: 'sidekick-list', 'aria-label': 'Lead 模型列表' }));
 
     const sidekickSection = element('div', {}, element('h3', { text: 'Sidekick 模型' }),
-      element('p', { class: 'hint section-hint', text: '选择可作为辅助模型的导入模型与官方模型。移除仅排除该角色，不删除基础模型。' }));
+      element('p', { class: 'hint section-hint', text: '默认开启已导入模型和官方支持此角色的模型；其他官方模型可按需开启。预设只使用已开启项。' }));
     const sidekickInput = element('input', { type: 'search', placeholder: '搜索 Sidekick 模型', 'aria-label': '搜索 Sidekick 模型',
       oninput: event => { sidekickSearch = event.target.value; renderRoleRows('sidekick'); }
     });
@@ -487,24 +495,31 @@ function panelClient(modelSupportsImages) {
     const list = state.roleLists?.[role] || [];
     const rows = list.filter(item => !query || item.label.toLocaleLowerCase().includes(query));
     container.replaceChildren();
-    for (const item of rows) {
-      let action;
-      if (item.selected) {
-        action = element('button', {
-          type: 'button', class: 'quiet', text: '移除', 'aria-label': `从 ${role} 移除 ` + item.label,
-          onclick: () => run(() => request('setRoleModel', { role, model: item.ref, enabled: false }), '正在更新角色模型…')
-        });
-      } else if (item.available) {
-        action = element('button', {
-          type: 'button', class: 'quiet', text: '添加', 'aria-label': `添加到 ${role} ` + item.label,
-          onclick: () => run(() => request('setRoleModel', { role, model: item.ref, enabled: true }), '正在更新角色模型…')
-        });
-      } else {
-        action = element('span', { class: 'hint', text: item.reason || '不可用' });
-      }
-      container.append(element('div', { class: 'sidekick-row' },
-        element('span', { text: (item.native ? '原生 · ' : '') + item.label }),
-        element('div', { class: 'actions' }, action)));
+    const roleName = role === 'lead' ? 'Lead' : 'Sidekick';
+    const row = item => {
+      const toggle = element('input', {
+        type: 'checkbox', role: 'switch', class: 'role-switch', checked: item.selected === true,
+        disabled: item.available !== true || state.enabled === false,
+        'aria-label': `在 ${roleName} 中启用 ` + item.label,
+        onchange: event => {
+          const checked = event.target.checked;
+          run(() => request('setRoleModel', { role, model: item.ref, enabled: checked }), '正在更新角色模型…')
+            .then(ok => { if (!ok) event.target.checked = !checked; });
+        }
+      });
+      return element('label', { class: 'sidekick-row' },
+        element('span', { text: (item.native ? '官方 · ' : '') + item.label }),
+        element('div', { class: 'actions' }, item.available ? toggle : element('span', { class: 'hint', text: item.reason || '不可用' })));
+    };
+    const mainRows = query ? rows : rows.filter(item => !item.native || item.defaultSelected || item.selected || item.explicitIncluded);
+    const extraRows = query ? [] : rows.filter(item => item.native && !item.defaultSelected && !item.selected && !item.explicitIncluded);
+    for (const item of mainRows) container.append(row(item));
+    if (extraRows.length) {
+      const details = element('details', {}, element('summary', { text: `更多官方模型（${extraRows.length}）` }));
+      details.open = roleDetailsOpen[role];
+      details.addEventListener('toggle', () => { roleDetailsOpen[role] = details.open; });
+      for (const item of extraRows) details.append(row(item));
+      container.append(details);
     }
     if (!rows.length) {
       container.append(element('div', { class: 'empty', text: list.length ? '没有匹配的模型。' : '等待 Devin 上报官方模型，或先导入第三方模型。' }));
@@ -522,7 +537,7 @@ function panelClient(modelSupportsImages) {
     search.value = nativeSearch;
     container.append(element('div', { class: 'toolbar' }, search, element('button', { type: 'button', text: '刷新官方模型',
       onclick: () => run(() => request('refreshNativeModels'), '正在同步官方模型…') })));
-    container.append(element('p', { class: 'hint section-hint', text: '移除只在本机模型列表中隐藏，不影响官方账号和权限；加回后等 Devin 刷新列表即可恢复。标记“可作 Sidekick”的模型会自动加入 Fusion 组合。' }));
+    container.append(element('p', { class: 'hint section-hint', text: '移除只在本机模型列表中隐藏，不影响官方账号和权限；加回后等 Devin 刷新列表即可恢复。符合条件的官方模型会显示为预设候选；保存预设后才会生成组合，实际可用性取决于账号返回的模型目录。' }));
     container.append(element('div', { id: 'native-list', class: 'model-list', 'aria-label': '官方模型列表' }));
     renderNativeRows();
   }
@@ -539,14 +554,19 @@ function panelClient(modelSupportsImages) {
       return;
     }
     for (const model of models) {
-      const action = model.hidden
-        ? element('button', { type: 'button', class: 'quiet', text: '加回', 'aria-label': '加回官方模型 ' + model.uid,
-            onclick: () => run(() => request('setNativeModelHidden', { uid: model.uid, hidden: false }), '正在恢复官方模型…') })
-        : element('button', { type: 'button', class: 'quiet', text: '移除', 'aria-label': '移除官方模型 ' + model.uid,
-            onclick: () => run(() => request('setNativeModelHidden', { uid: model.uid, hidden: true }), '正在移除官方模型…') });
+      const action = element('input', {
+        type: 'checkbox', role: 'switch', class: 'role-switch', checked: model.hidden !== true,
+        disabled: state.enabled === false,
+        'aria-label': '在列表中显示官方模型 ' + model.uid,
+        onchange: event => {
+          const show = event.target.checked;
+          run(() => request('setNativeModelHidden', { uid: model.uid, hidden: !show }), show ? '正在恢复官方模型…' : '正在移除官方模型…')
+            .then(ok => { if (!ok) event.target.checked = !show; });
+        }
+      });
       const status = model.hidden ? '已移除'
         : model.disabled ? '显示中 · 官方不可用'
-        : model.eligible === true ? '显示中 · 可作 Sidekick'
+        : model.eligible === true ? '显示中 · 可作 Lead / Sidekick'
         : '显示中 · 缺少支持的执行通道';
       container.append(element('div', { class: 'model-row' },
         element('span', { class: 'model-text' }, element('span', { class: 'model-title', text: model.label || model.uid }),
@@ -660,10 +680,10 @@ function panelClient(modelSupportsImages) {
     for (const role of ['lead', 'sidekick']) {
       const candidates = [...(state.presetCandidates?.[role] || [])];
       const key = ref => JSON.stringify([ref?.nativeUid || '', ref?.providerId || '', ref?.model || '', ref?.effort ?? null]);
-      if (preset?.[role] && !candidates.some(item => key(item.ref) === key(preset[role]))) candidates.push({ ref: preset[role], label: '当前不可用：' + (preset[role].nativeUid || preset[role].model) });
+      if (preset?.[role] && !candidates.some(item => key(item.ref) === key(preset[role]))) candidates.push({ ref: preset[role], label: '当前不可用：' + (preset[role].nativeUid || preset[role].model), unavailable: true });
       const select = element('select', { required: true, 'aria-label': role === 'lead' ? 'Lead 模型与档位' : 'Sidekick 模型与档位' });
       select.append(element('option', { value: '', text: '请选择模型与档位' }));
-      candidates.forEach((item, index) => select.append(element('option', { value: String(index), text: item.label })));
+      candidates.forEach((item, index) => select.append(element('option', { value: String(index), text: (item.ref.nativeUid ? '官方 · ' : '') + item.label, disabled: item.unavailable === true })));
       if (preset?.[role]) select.value = String(candidates.findIndex(item => key(item.ref) === key(preset[role])));
       form.append(element('label', { class: 'field' }, element('span', { class: 'field-title', text: role === 'lead' ? 'Lead 模型与档位' : 'Sidekick 模型与档位' }), select));
       selections[role] = () => select.value === '' ? null : candidates[Number(select.value)]?.ref;

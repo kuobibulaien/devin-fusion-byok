@@ -301,11 +301,60 @@ function discoverOfficialRoles(nativeModels, hiddenSet, config = {}) {
   return { eligibleNativeLeads, eligibleNativeSidekicks, reservedOrders, reservedLeadOrders, hiddenFusionUids };
 }
 
+function discoverNamedPresetRoles(nativeModels, hiddenSet, officialRoles) {
+  const records = new Map();
+  const conflicts = new Set();
+  for (const entry of Array.isArray(nativeModels) ? nativeModels : []) {
+    const uid = typeof entry?.uid === 'string' ? entry.uid : '';
+    if (!uid || uid.length > 256 || ownUid(uid) || uid.startsWith('fusion-') || hiddenSet.has(uid)) continue;
+    const harnessUids = entry.harnessUids;
+    const eligible = entry.disabled === false && entry.isModelRouter === false && Array.isArray(harnessUids) &&
+      harnessUids.length > 0 && harnessUids.every(value => typeof value === 'string' && value.trim().length > 0);
+    const record = { uid, label: typeof entry.label === 'string' && entry.label ? entry.label : uid,
+      harnessUids: Array.isArray(harnessUids) ? [...harnessUids] : null, eligible,
+      maxTokens: entry.maxTokens, maxOutputTokens: entry.maxOutputTokens, supportsImages: entry.supportsImages === true };
+    const prior = records.get(uid);
+    if (prior && (prior.eligible !== record.eligible || JSON.stringify(prior.harnessUids) !== JSON.stringify(record.harnessUids) ||
+      prior.label !== record.label)) conflicts.add(uid);
+    else if (!prior) records.set(uid, record);
+  }
+  for (const uid of conflicts) records.delete(uid);
+  const leads = new Map(), sidekicks = new Map();
+  for (const native of records.values()) {
+    if (!native.eligible) continue;
+    const officialLead = officialRoles.eligibleNativeLeads.get(native.uid);
+    const officialSidekick = officialRoles.eligibleNativeSidekicks.get(native.uid);
+    leads.set(native.uid, officialLead || { ...native, leadHarnessUids: [...new Set(['fusion', ...native.harnessUids])] });
+    sidekicks.set(native.uid, officialSidekick || { ...native, dimension: undefined });
+  }
+  return { eligibleNativeLeads: leads, eligibleNativeSidekicks: sidekicks };
+}
+
+function roleRefs(config = {}, role) {
+  const exclusions = new Set((Array.isArray(config.roleExclusions?.[role]) ? config.roleExclusions[role] : []).map(refKey).filter(Boolean));
+  const inclusions = new Set((Array.isArray(config.roleInclusions?.[role]) ? config.roleInclusions[role] : []).map(refKey).filter(Boolean));
+  const saved = new Set();
+  for (const preset of Array.isArray(config.fusionPresets) ? config.fusionPresets : []) {
+    const key = refKey(preset?.[role]);
+    if (key) saved.add(key);
+  }
+  return { exclusions, inclusions, saved };
+}
+
+function roleSelected(ref, refs, defaultSelected) {
+  const key = refKey(ref);
+  if (!key || refs.exclusions.has(key)) return false;
+  return defaultSelected || refs.inclusions.has(key) || refs.saved.has(key);
+}
+
 function buildRoleLists(config = {}, nativeModels = []) {
   const hiddenSet = new Set(Array.isArray(config.hiddenNativeModelUids) ? config.hiddenNativeModelUids : []);
-  const { eligibleNativeLeads, eligibleNativeSidekicks } = discoverOfficialRoles(nativeModels, hiddenSet, config);
-  const leadExclusions = new Set((Array.isArray(config.roleExclusions?.lead) ? config.roleExclusions.lead : []).map(refKey));
-  const sidekickExclusions = new Set((Array.isArray(config.roleExclusions?.sidekick) ? config.roleExclusions.sidekick : []).map(refKey));
+  const officialRoles = discoverOfficialRoles(nativeModels, hiddenSet, config);
+  const { eligibleNativeLeads, eligibleNativeSidekicks } = discoverNamedPresetRoles(nativeModels, hiddenSet, officialRoles);
+  const strictLeadUids = new Set(officialRoles.eligibleNativeLeads.keys());
+  const strictSidekickUids = new Set(officialRoles.eligibleNativeSidekicks.keys());
+  const leadRefs = roleRefs(config, 'lead');
+  const sidekickRefs = roleRefs(config, 'sidekick');
 
   const providers = Array.isArray(config.providers) ? config.providers : [];
   const leadList = [], sidekickList = [];
@@ -326,7 +375,8 @@ function buildRoleLists(config = {}, nativeModels = []) {
         seenLeadKeys.add(key);
         leadList.push({
           ref, label, native: false,
-          available, selected: available && !leadExclusions.has(key),
+          available, selected: available && roleSelected(ref, leadRefs, true),
+          defaultSelected: available,
           ...(available ? {} : { disabled: true, reason: '已在供应商中停用' }),
         });
       }
@@ -334,7 +384,8 @@ function buildRoleLists(config = {}, nativeModels = []) {
         seenSidekickKeys.add(key);
         sidekickList.push({
           ref, label, native: false,
-          available, selected: available && !sidekickExclusions.has(key),
+          available, selected: available && roleSelected(ref, sidekickRefs, true),
+          defaultSelected: available,
           ...(available ? {} : { disabled: true, reason: '已在供应商中停用' }),
         });
       }
@@ -347,7 +398,9 @@ function buildRoleLists(config = {}, nativeModels = []) {
     seenLeadKeys.add(key);
     leadList.push({
       ref, label: nativeLead.label || nativeLead.uid, native: true,
-      available: true, selected: !leadExclusions.has(key),
+      available: true, selected: roleSelected(ref, leadRefs, strictLeadUids.has(nativeLead.uid)),
+      defaultSelected: strictLeadUids.has(nativeLead.uid),
+      explicitIncluded: leadRefs.inclusions.has(key) || leadRefs.saved.has(key),
     });
   }
 
@@ -357,7 +410,9 @@ function buildRoleLists(config = {}, nativeModels = []) {
     seenSidekickKeys.add(key);
     sidekickList.push({
       ref, label: nativeSidekick.label || nativeSidekick.uid, native: true,
-      available: true, selected: !sidekickExclusions.has(key),
+      available: true, selected: roleSelected(ref, sidekickRefs, strictSidekickUids.has(nativeSidekick.uid)),
+      defaultSelected: strictSidekickUids.has(nativeSidekick.uid),
+      explicitIncluded: sidekickRefs.inclusions.has(key) || sidekickRefs.saved.has(key),
     });
   }
 
@@ -367,7 +422,7 @@ function buildRoleLists(config = {}, nativeModels = []) {
     seenLeadKeys.add(key);
     leadList.push({
       ref, label: ref.nativeUid || ((ref.providerId || '') + ' · ' + (ref.model || '')),
-      native: !!ref.nativeUid, available: false, selected: false,
+      native: !!ref.nativeUid, available: false, selected: false, defaultSelected: false,
       disabled: true, reason: '当前未在可用列表中',
     });
   }
@@ -377,7 +432,27 @@ function buildRoleLists(config = {}, nativeModels = []) {
     seenSidekickKeys.add(key);
     sidekickList.push({
       ref, label: ref.nativeUid || ((ref.providerId || '') + ' · ' + (ref.model || '')),
-      native: !!ref.nativeUid, available: false, selected: false,
+      native: !!ref.nativeUid, available: false, selected: false, defaultSelected: false,
+      disabled: true, reason: '当前未在可用列表中',
+    });
+  }
+  for (const ref of Array.isArray(config.roleInclusions?.lead) ? config.roleInclusions.lead : []) {
+    const key = refKey(ref);
+    if (!key || seenLeadKeys.has(key)) continue;
+    seenLeadKeys.add(key);
+    leadList.push({
+      ref, label: ref.nativeUid || ((ref.providerId || '') + ' · ' + (ref.model || '')),
+      native: !!ref.nativeUid, available: false, selected: false, defaultSelected: false, explicitIncluded: true,
+      disabled: true, reason: '当前未在可用列表中',
+    });
+  }
+  for (const ref of Array.isArray(config.roleInclusions?.sidekick) ? config.roleInclusions.sidekick : []) {
+    const key = refKey(ref);
+    if (!key || seenSidekickKeys.has(key)) continue;
+    seenSidekickKeys.add(key);
+    sidekickList.push({
+      ref, label: ref.nativeUid || ((ref.providerId || '') + ' · ' + (ref.model || '')),
+      native: !!ref.nativeUid, available: false, selected: false, defaultSelected: false, explicitIncluded: true,
       disabled: true, reason: '当前未在可用列表中',
     });
   }
@@ -427,8 +502,10 @@ function buildCatalog(config = {}, nativeModels = []) {
     hiddenNativeModelUids.push(uid);
   }
   const hiddenSet = new Set(hiddenNativeModelUids);
-  const { eligibleNativeLeads, eligibleNativeSidekicks, hiddenFusionUids } =
-    discoverOfficialRoles(nativeModels, hiddenSet, config);
+  const officialRoles = discoverOfficialRoles(nativeModels, hiddenSet, config);
+  const { eligibleNativeLeads: presetNativeLeads, eligibleNativeSidekicks: presetNativeSidekicks } =
+    discoverNamedPresetRoles(nativeModels, hiddenSet, officialRoles);
+  const { eligibleNativeLeads, eligibleNativeSidekicks, hiddenFusionUids } = officialRoles;
 
   // Labels also identify entries in native sort groups. Disambiguate providers
   // with equal display names without changing stable routing identities.
@@ -445,8 +522,9 @@ function buildCatalog(config = {}, nativeModels = []) {
       family: { modelFamilyLabel: lead.familyLabel, entries: [{ key: 'Effort', value: effort }] } }));
   }
 
-  const leadExclusions = new Set((config.roleExclusions?.lead || []).map(refKey));
-  const sidekickExclusions = new Set((config.roleExclusions?.sidekick || []).map(refKey));
+  const roleSelection = buildRoleLists(config, nativeModels);
+  const selectedLeadKeys = new Set(roleSelection.lead.filter(item => item.selected).map(item => refKey(item.ref)));
+  const selectedSidekickKeys = new Set(roleSelection.sidekick.filter(item => item.selected).map(item => refKey(item.ref)));
 
   if (Array.isArray(config.sidekicks)) {
     for (const item of config.sidekicks) {
@@ -463,8 +541,9 @@ function buildCatalog(config = {}, nativeModels = []) {
     }
   }
 
-  const selectedImportedLeads = leads.filter(lead => !leadExclusions.has(refKey({ providerId: lead.providerId, model: lead.model })));
-  const selectedNativeLeads = [...eligibleNativeLeads.values()].filter(native => !leadExclusions.has(refKey({ nativeUid: native.uid })));
+  const selectedImportedLeads = leads.filter(lead => selectedLeadKeys.has(refKey({ providerId: lead.providerId, model: lead.model })));
+  const selectedPresetNativeLeads = [...presetNativeLeads.values()].filter(native => selectedLeadKeys.has(refKey({ nativeUid: native.uid })));
+  const presetNativeSidekickCandidates = [...presetNativeSidekicks.values()].filter(native => selectedSidekickKeys.has(refKey({ nativeUid: native.uid })));
 
   const sidekicks = [], seenSidekicks = new Set();
   const leadFamilies = new Map();
@@ -476,14 +555,14 @@ function buildCatalog(config = {}, nativeModels = []) {
     const lead = candidates.find(item => !item.effort) || candidates.find(item => item.effort === 'high') || candidates[0];
     if (!lead) continue;
     const ref = { providerId: lead.providerId, model: lead.model };
-    if (!seenSidekicks.has(key) && !sidekickExclusions.has(refKey(ref))) {
+    if (!seenSidekicks.has(key) && selectedSidekickKeys.has(refKey(ref))) {
       seenSidekicks.add(key);
       sidekicks.push({ uid: lead.uid, label: lead.familyLabel, native: false, providerId: lead.providerId, model: lead.model });
     }
   }
   for (const native of [...eligibleNativeSidekicks.values()].sort((a, b) => a.uid < b.uid ? -1 : a.uid > b.uid ? 1 : 0)) {
     const ref = { nativeUid: native.uid };
-    if (!seenSidekicks.has(native.uid) && !sidekickExclusions.has(refKey(ref))) {
+    if (!seenSidekicks.has(native.uid) && selectedSidekickKeys.has(refKey(ref))) {
       seenSidekicks.add(native.uid);
       sidekicks.push({ uid: native.uid, label: native.label, native: true, harnessUids: native.harnessUids, dimension: native.dimension });
     }
@@ -493,14 +572,14 @@ function buildCatalog(config = {}, nativeModels = []) {
     ref: { providerId: lead.providerId, model: lead.model, effort: lead.effort },
     label: lead.familyLabel + (lead.effort ? ` · ${effortMetadata(lead.effort).name}` : ' · 默认档位') });
   const candidates = {
-    lead: [...selectedImportedLeads.map(importedCandidate), ...selectedNativeLeads.map(native => ({
+    lead: [...selectedImportedLeads.map(importedCandidate), ...selectedPresetNativeLeads.map(native => ({
       ...native, native: true, ref: { nativeUid: native.uid },
       contextWindow: positive(native.maxTokens, 272000),
       maxOutputTokens: Math.min(positive(native.maxOutputTokens, 16384), positive(native.maxTokens, 272000)),
       inferenceServerUrl,
     }))],
-    sidekick: [...leads.filter(lead => !sidekickExclusions.has(refKey(lead))).map(importedCandidate),
-      ...sidekicks.filter(sidekick => sidekick.native).map(sidekick => ({ ...sidekick, ref: { nativeUid: sidekick.uid } }))],
+    sidekick: [...leads.filter(lead => selectedSidekickKeys.has(refKey({ providerId: lead.providerId, model: lead.model }))).map(importedCandidate),
+      ...presetNativeSidekickCandidates.map(native => ({ ...native, native: true, ref: { nativeUid: native.uid } }))],
   };
   const candidateKey = ref => refKey(ref) && !(ref.nativeUid && Object.hasOwn(ref, 'effort')) && JSON.stringify([refKey(ref), ref.nativeUid ? null : ref.effort ?? null]);
   const indexes = Object.fromEntries(Object.entries(candidates).map(([role, items]) => [role, new Map(items.map(item => [candidateKey(item.ref), item]))]));
