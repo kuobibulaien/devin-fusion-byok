@@ -7,12 +7,16 @@ const vm = require('node:vm');
 const { modelEfforts } = require('../src/model-capabilities.cjs');
 const { buildCatalog, resolveAssignment } = require('../src/catalog.cjs');
 const { buildRequestBody } = require('../src/protocol/responses.cjs');
+const { withPresets } = require('./fixtures/presets.cjs');
 const { createManager } = require('../src/panel/model.cjs');
 const rendererFile = '/Applications/Devin.app/Contents/Resources/app/out/vs/workbench/windsurf-chat-client/index.js';
 const config = () => ({ providers: [{ id: 'load', name: 'load', apiFormat: 'openai-responses', models:
   ['gpt-6-astra', 'swe-2-high', 'swe-2-max', 'swe-2-medium'].map(id => ({ id, efforts: [] })) }],
   sidekicks: [{ providerId: 'load', model: 'swe-2-max' }, { nativeUid: 'swe-2-max' }] });
-const OBSERVED_SWE = { uid: 'swe-2-max', label: 'SWE-2 Max', disabled: false, isModelRouter: false, harnessUids: ['swe-1p6', 'swe-1p5'] };
+const OBSERVED_SWE = [
+  { uid: 'swe-2-max', label: 'SWE-2 Max', disabled: false, isModelRouter: false, harnessUids: ['swe-1p6', 'swe-1p5'] },
+  { uid: 'fusion-lead-a-sidekick-swe-2-max', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 3, name: 'SWE-2 Max' } },
+];
 
 test('legacy empty effort lists gain GPT presets while retaining provider-default routing UIDs', () => {
   const catalog = buildCatalog(config());
@@ -30,19 +34,19 @@ test('legacy empty effort lists gain GPT presets while retaining provider-defaul
 test('every enabled import is a Sidekick without a second configuration step', () => {
   const input = config();
   input.providers.push({ id: 'other', name: 'Other', models: [{ id: 'extra' }, { id: 'disabled', enabled: false }] });
-  const catalog = buildCatalog(input, [OBSERVED_SWE]);
+  const catalog = buildCatalog(input, OBSERVED_SWE);
   assert.deepEqual(new Set(catalog.sidekicks.filter(s => !s.native).map(s => s.providerId + '/' + s.model)),
     new Set(['load/gpt-6-astra', 'load/swe-2-high', 'load/swe-2-max', 'load/swe-2-medium', 'other/extra']));
   for (const route of Object.values(catalog.routes)) {
     const pairs = Object.values(catalog.fusions).filter(f => f.leadUid === route.uid);
-    assert.equal(pairs.length, 6);
-    assert.equal(new Set(pairs.map(f => f.sidekickUid)).size, 6);
+    assert.equal(pairs.length, 0);
+    assert.ok(catalog.presetCandidates.sidekick.length >= 6);
   }
   assert.equal(input.sidekicks.length, 2, 'catalog generation does not rewrite user settings');
 });
 
 test('selected native Fusion effort resolves to the actual Responses and Chat API parameter', () => {
-  const catalog = buildCatalog(config());
+  const catalog = buildCatalog(withPresets(config()));
   const request = { systemPrompt: '', messages: [{ role: 'user', content: 'Hello' }] };
   for (const effort of ['low', 'medium', 'high', 'xhigh']) {
     const pair = Object.values(catalog.fusions).find(f => catalog.routes[f.leadUid].model === 'gpt-6-astra' && catalog.routes[f.leadUid].effort === effort &&
@@ -61,40 +65,31 @@ test('selected native Fusion effort resolves to the actual Responses and Chat AP
 
 test('actual installed Fusion picker enables every GPT effort and imported Sidekick', { skip: !fs.existsSync(rendererFile) }, () => {
   const source = fs.readFileSync(rendererFile, 'utf8');
-  const start = source.indexOf('function nrM('), end = source.indexOf('let nrG=', start);
+  const start = source.indexOf('function nrP('), end = source.indexOf('let nr$=', start);
   assert.ok(start >= 0 && end > start);
-  const native = vm.runInNewContext(source.slice(start, end) + ';({nrM,nrF,nrq})');
-  const catalog = buildCatalog(config(), [OBSERVED_SWE]);
-  const models = catalog.models.filter(m => m.kind === 'fusion').map(m => ({ modelUid: m.uid, disabled: false, familyUid: 'fusion',
+  const native = vm.runInNewContext(source.slice(start, end) + ';({nrz,nrV})');
+  const catalog = buildCatalog(withPresets(config(), OBSERVED_SWE), OBSERVED_SWE);
+  const models = catalog.models.filter(m => m.kind === 'fusion').map(m => ({ modelUid: m.uid, disabled: false, familyUid: m.json.modelInfo.modelFamilyUid,
     familyMetadata: Object.fromEntries(m.json.modelFamilyMetadata.entries.map(e => [e.key, e.value])) }));
-  const family = native.nrM(models).families.get('fusion');
-  const effortIndex = family.dimensions.findIndex(d => d.name === 'Effort');
-  const sidekickIndex = family.dimensions.findIndex(d => d.name === 'Sidekick');
-  const initial = models.find(m => catalog.routes[catalog.fusions[m.modelUid].leadUid].model === 'gpt-6-astra');
-  for (const dimension of family.dimensions[effortIndex].values) {
-    assert.equal(native.nrF(family, initial, effortIndex, dimension.order), true, dimension.name);
-    const selected = native.nrq(family, initial, effortIndex, dimension.order);
-    assert.equal(selected.familyMetadata.Effort.name, dimension.name);
-    for (const sidekick of family.dimensions[sidekickIndex].values) {
-      assert.equal(native.nrF(family, selected, sidekickIndex, sidekick.order), true, sidekick.name);
-      const changed = native.nrq(family, selected, sidekickIndex, sidekick.order);
-      assert.equal(changed.familyMetadata.Sidekick.name, sidekick.name);
-      assert.equal(changed.familyMetadata.Effort.name, dimension.name);
-    }
-  }
+  const rows = native.nrV(native.nrz(models), [], undefined, false);
+  assert.equal(rows.length, Object.keys(catalog.fusions).length);
+  for (const effort of ['low', 'medium', 'high', 'xhigh']) assert.ok(rows.some(row => catalog.routes[catalog.fusions[row.model.modelUid].leadUid].effort === effort));
 });
 
 test('selective import immediately exposes the new model in both roles and effort settings are editable', async () => {
   let current = { providers: [{ id: 'load', name: 'load', models: [] }], sidekicks: [{ nativeUid: 'swe-2-max' }] };
   const manager = createManager({ read: () => structuredClone(current), write: c => { current = c; },
-    discover: async p => { p.models = [{ id: 'gpt-6-astra', efforts: [] }] }, nativeModels: () => [OBSERVED_SWE] });
+    discover: async p => { p.models = [{ id: 'gpt-6-astra', efforts: [] }] }, nativeModels: () => OBSERVED_SWE });
   const preview = await manager.dispatch('refreshModels', { providerId: 'load' });
   assert.equal(preview.fusionCount, 0);
   const imported = await manager.dispatch('importModels', { providerId: 'load', token: preview.importCandidates.token, ids: ['gpt-6-astra'] });
-  assert.equal(imported.fusionCount, 10);
+  assert.equal(imported.fusionCount, 0);
+  assert.equal(imported.presetCandidates.lead.length, 5);
   assert.ok(imported.sidekicks.some(s => s.providerId === 'load' && s.model === 'gpt-6-astra'));
   const custom = await manager.dispatch('updateModels', { providerId: 'load', changes: [{ id: 'gpt-6-astra', effortMode: 'manual', efforts: ['low', 'high'] }] });
-  assert.equal(custom.fusionCount, 4);
+  assert.equal(custom.fusionCount, 0);
+  assert.equal(custom.presetCandidates.lead.length, 2);
   const providerDefault = await manager.dispatch('updateModels', { providerId: 'load', changes: [{ id: 'gpt-6-astra', effortMode: 'none' }] });
-  assert.equal(providerDefault.fusionCount, 2);
+  assert.equal(providerDefault.fusionCount, 0);
+  assert.equal(providerDefault.presetCandidates.lead.length, 1);
 });

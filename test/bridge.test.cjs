@@ -162,13 +162,16 @@ test('the first catalog response already combines a newly observed eligible nati
   const original = { clientModelConfigs: [
     { modelUid: 'swe-2-medium', label: 'SWE-2 Medium', modelInfo: { harnessUids: ['swe-1p5'], isModelRouter: false } },
     { modelUid: 'swe-locked', label: 'Locked', disabled: true, modelInfo: { harnessUids: ['swe-1p6'], isModelRouter: false } },
+    { modelUid: 'fusion-lead-a-sidekick-swe-2-medium', label: 'F', modelInfo: { harnessUids: ['fusion'], isModelRouter: true },
+      modelFamilyMetadata: { entries: [{ key: 'Sidekick', value: { order: 1, name: 'SWE-2 Medium' } }] } },
   ] };
   const native = await listen((req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify(original));
   });
   t.after(() => native.close());
-  const config = { providers: [{ id: 'test', name: 'Test', models: [{ id: 'lead', label: 'Lead' }] }] };
+  const config = { providers: [{ id: 'test', name: 'Test', models: [{ id: 'lead', label: 'Lead' }] }],
+    fusionPresets: ['swe-2-medium', 'gpt-5-6-luna-high'].map(uid => ({ id: uid, name: uid, lead: { providerId: 'test', model: 'lead' }, sidekick: { nativeUid: uid } })) };
   let observations = 0;
   const bridge = await createLsBridge(native.port, {
     getCatalog: () => buildCatalog(config, observed),
@@ -184,5 +187,42 @@ test('the first catalog response already combines a newly observed eligible nati
   assert.deepEqual(combo.sidekickHarnessUids, ['swe-1p5']);
   const uids = JSON.parse(response.body).clientModelConfigs.map(model => model.modelUid);
   assert.ok(uids.includes(combo.uid), 'the same response already carries the new combination');
-  assert.equal(uids.filter(uid => uid.startsWith('fusion-dfbyok-')).length, 2, 'one Lead x two eligible Sidekicks (provider + observed native)');
+  assert.equal(uids.filter(uid => uid.startsWith('fusion-dfbyok-')).length, 1, 'only the saved preset with observed native capability is emitted');
+});
+
+test('the first catalog response binds official Sidekick dimensions and unlocks paired harnesses', async t => {
+  const observed = [];
+  const original = { clientModelConfigs: [
+    { modelUid: 'gpt-5-6-luna-high', label: 'GPT-5.6 Luna High Thinking',
+      modelInfo: { harnessUids: ['gpt-5p6'], isModelRouter: false } },
+    { modelUid: 'fusion-claude-opus-5-max-sidekick-gpt-5-6-luna-high', label: 'Fusion (Claude Opus 5 Max + GPT-5.6 Luna High)',
+      modelInfo: { harnessUids: ['fusion'], isModelRouter: true },
+      modelFamilyMetadata: { entries: [{ key: 'Sidekick', value: { order: 4, name: 'GPT-5.6 Luna High', controlType: 3 } }] } },
+  ] };
+  const native = await listen((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(original));
+  });
+  t.after(() => native.close());
+  const config = { providers: [{ id: 'test', name: 'Test', models: [{ id: 'lead', label: 'Lead' }] }],
+    fusionPresets: ['swe-2-medium', 'gpt-5-6-luna-high'].map(uid => ({ id: uid, name: uid, lead: { providerId: 'test', model: 'lead' }, sidekick: { nativeUid: uid } })) };
+  const reports = [];
+  const bridge = await createLsBridge(native.port, {
+    getCatalog: () => buildCatalog(config, observed),
+    onNativeModels: entries => { reports.push(entries); observed.push(...entries); },
+  });
+  t.after(() => bridge.close());
+  const response = await request(bridge.port, LS + 'GetCliModelConfigs');
+  assert.equal(response.status, 200);
+  assert.equal(reports.length, 1);
+  assert.deepEqual(reports[0].find(entry => entry.uid.startsWith('fusion-'))?.sidekickDimension, { order: 4, name: 'GPT-5.6 Luna High', fastModeOrder: 0 });
+  const expected = buildCatalog(config, observed).fusions;
+  const combo = Object.values(expected).find(fusion => fusion.sidekickUid === 'gpt-5-6-luna-high');
+  assert.ok(combo, 'the officially paired native is eligible with its declared harness');
+  assert.deepEqual(combo.sidekickHarnessUids, ['gpt-5p6']);
+  const emitted = JSON.parse(response.body).clientModelConfigs.find(model => model.modelUid === combo.uid);
+  assert.ok(emitted, 'the same response already carries the bound combination');
+  assert.deepEqual(emitted.modelFamilyMetadata.entries, []);
+  assert.equal(emitted.label, 'gpt-5-6-luna-high');
+  assert.match(emitted.modelInfo.modelFamilyUid, /^dfbyok-preset-family-/);
 });

@@ -78,7 +78,14 @@ function parseEvent(raw) {
   if (!data.length) return null;
   const joined = data.join('\n');
   if (joined.trim() === '[DONE]') return { type: 'done' };
-  const value = JSON.parse(joined);
+  let value;
+  try {
+    value = JSON.parse(joined);
+  } catch {
+    const err = new Error('Invalid SSE event JSON');
+    err.code = 'upstream_invalid_json';
+    throw err;
+  }
   return { type: value.type || event, data: value };
 }
 
@@ -87,7 +94,11 @@ async function* events(body) {
   let buffer = '';
   for await (const chunk of body) {
     buffer += decoder.decode(chunk, { stream: true });
-    if (buffer.length > MAX_SSE_BUFFER) throw new Error('SSE frame too large');
+    if (buffer.length > MAX_SSE_BUFFER) {
+      const err = new Error('SSE frame too large');
+      err.code = 'upstream_content_type';
+      throw err;
+    }
     let match;
     while ((match = /\r?\n\r?\n/.exec(buffer))) {
       const raw = buffer.slice(0, match.index);
@@ -109,7 +120,11 @@ function processor(id, uid, chat, emit) {
   let finished = false;
   const getCall = (index, itemId) => {
     const key = index ?? itemIndexes.get(itemId) ?? itemId;
-    if (key === undefined) throw new Error('Tool call has no index');
+    if (key === undefined) {
+      const err = new Error('Tool call has no index');
+      err.code = 'upstream_invalid_tool';
+      throw err;
+    }
     if (itemId) itemIndexes.set(itemId, key);
     if (!calls.has(key)) calls.set(key, { id: '', name: '', arguments: '', complete: undefined });
     return calls.get(key);
@@ -117,7 +132,11 @@ function processor(id, uid, chat, emit) {
   const text = async (key, value, complete = false, thinking = false) => {
     if (typeof value !== 'string') return;
     const previous = texts.get(key) || '';
-    if (complete && !value.startsWith(previous)) throw new Error('Inconsistent completed text');
+    if (complete && !value.startsWith(previous)) {
+      const err = new Error('Inconsistent completed text');
+      err.code = 'upstream_invalid_json';
+      throw err;
+    }
     const delta = complete ? value.slice(previous.length) : value;
     texts.set(key, complete ? value : previous + value);
     if (delta) await emit(thinking ? thinkingChunk(id, delta) : textChunk(id, delta));
@@ -146,7 +165,11 @@ function processor(id, uid, chat, emit) {
         if (!terminal && chat) terminal = true;
         return;
       }
-      if (!data || data.error) throw new Error('Upstream stream error');
+      if (!data || data.error) {
+        const err = new Error('Upstream stream error');
+        err.code = 'upstream_stream_error';
+        throw err;
+      }
       if (chat) {
         for (const choice of data.choices || []) {
           if ((choice.index ?? 0) !== 0) continue;
@@ -161,7 +184,7 @@ function processor(id, uid, chat, emit) {
           }
           if (choice.finish_reason) {
             terminal = true;
-            reason = choice.finish_reason === 'length' ? 3 : choice.finish_reason === 'content_filter' ? 13 : 2;
+            reason = choice.finish_reason === 'length' ? 3 : choice.finish_reason === 'content_filter' ? 11 : 2;
           }
         }
         return;
@@ -176,24 +199,46 @@ function processor(id, uid, chat, emit) {
         case 'response.reasoning.delta':
         case 'response.reasoning_summary_text.delta': await text(`reasoning:${data.output_index ?? 0}:${data.summary_index ?? 0}`, data.delta, false, true); break;
         case 'response.completed':
-          if (data.response?.status && data.response.status !== 'completed') throw new Error('Unexpected completion status');
+          if (data.response?.status && data.response.status !== 'completed') {
+            const err = new Error('Unexpected completion status');
+            err.code = 'upstream_stream_error';
+            throw err;
+          }
           for (const [index, value] of (data.response?.output || []).entries()) await item(value, index, true);
           terminal = true;
           break;
         case 'response.incomplete': terminal = true; reason = 3; break;
         case 'response.failed':
-        case 'error': throw new Error('Upstream response failed');
+        case 'error': {
+          const err = new Error('Upstream response failed');
+          err.code = 'upstream_stream_error';
+          throw err;
+        }
       }
     },
     async finish() {
       if (finished) return [];
-      if (!terminal) throw new Error('Upstream stream ended without completion');
+      if (!terminal) {
+        const err = new Error('Upstream stream ended without completion');
+        err.code = 'upstream_stream_incomplete';
+        throw err;
+      }
       const tools = [];
       const orderedCalls = [...calls.entries()].sort(([left], [right]) => typeof left === 'number' && typeof right === 'number' ? left - right : 0);
       if (reason === 2) for (const [, call] of orderedCalls) {
         const args = call.complete ?? call.arguments;
-        if (!call.name || !call.id || typeof args !== 'string') throw new Error('Incomplete tool call');
-        JSON.parse(args); // Validate once, then forward the original JSON bytes.
+        if (!call.name || !call.id || typeof args !== 'string') {
+          const err = new Error('Incomplete tool call');
+          err.code = 'upstream_invalid_tool';
+          throw err;
+        }
+        try {
+          JSON.parse(args); // Validate once, then forward the original JSON bytes.
+        } catch {
+          const err = new Error('Invalid tool call JSON');
+          err.code = 'upstream_invalid_tool';
+          throw err;
+        }
         tools.push({ id: call.id, name: call.name, arguments: args });
       }
       if (tools.length) await emit(toolChunk(id, tools));
@@ -204,59 +249,152 @@ function processor(id, uid, chat, emit) {
   };
 }
 
-async function serveChat({ request, route, provider, res, signal, log = () => {} }) {
+async function serveChat({ request, route, provider, res, signal, log = () => {}, timeouts = {} }) {
   const id = randomUUID();
-  const controller = new AbortController();
-  const abort = () => controller.abort();
-  const close = () => { if (!res.writableEnded) controller.abort(); };
+  const upstreamController = new AbortController();
+  const abort = () => upstreamController.abort();
+  const close = () => { if (!res.writableEnded) upstreamController.abort(); };
   signal?.addEventListener('abort', abort, { once: true });
   res.on('close', close);
-  if (signal?.aborted) controller.abort();
+  if (signal?.aborted) upstreamController.abort();
   const write = async chunk => {
-    if (controller.signal.aborted || res.destroyed || res.writableEnded) throw new Error('Client closed');
+    if (signal?.aborted || res.destroyed || res.writableEnded) throw new Error('Client closed');
     if (!res.headersSent) res.writeHead(200, { 'content-type': 'application/connect+proto', 'cache-control': 'no-store' });
     if (!res.write(frame(chunk))) await new Promise((resolve, reject) => {
-      const clean = () => { res.off('drain', drained); res.off('close', closed); controller.signal.removeEventListener('abort', closed); };
+      const clean = () => { res.off('drain', drained); res.off('close', closed); signal?.removeEventListener('abort', closed); };
       const drained = () => { clean(); resolve(); };
       const closed = () => { clean(); reject(new Error('Client closed')); };
-      res.once('drain', drained); res.once('close', closed); controller.signal.addEventListener('abort', closed, { once: true });
+      res.once('drain', drained); res.once('close', closed); signal?.addEventListener('abort', closed, { once: true });
     });
   };
   let status = 0;
+  let classifiedCode = 'upstream_network';
   const record = event => { try { log(event); } catch { /* Diagnostics cannot fail a model request. */ } };
+
+  const firstResponseLimit = Number.isSafeInteger(timeouts?.firstResponseMs) && timeouts.firstResponseMs > 0
+    ? Math.min(timeouts.firstResponseMs, 2147483647) : 120000;
+  const idleLimit = Number.isSafeInteger(timeouts?.idleMs) && timeouts.idleMs > 0
+    ? Math.min(timeouts.idleMs, 2147483647) : 120000;
+
+  let activeTimer = null;
+  const clearTimer = () => { if (activeTimer) { clearTimeout(activeTimer); activeTimer = null; } };
+  const armTimer = (ms, code) => {
+    clearTimer();
+    activeTimer = setTimeout(() => {
+      classifiedCode = code;
+      upstreamController.abort();
+    }, ms);
+  };
+
   try {
     const { url, chat } = endpoint(provider);
     const body = buildRequestBody(request, route, provider);
-    const upstream = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'text/event-stream', ...(provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {}) }, body: JSON.stringify(body), signal: controller.signal });
+
+    armTimer(firstResponseLimit, 'upstream_timeout');
+    const upstream = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'text/event-stream',
+        ...(provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {})
+      },
+      body: JSON.stringify(body),
+      signal: upstreamController.signal
+    });
+    clearTimer();
+
     status = upstream.status;
-    if (!upstream.ok) { await upstream.body?.cancel(); throw new Error('Upstream HTTP error'); }
-    if (!upstream.body || !upstream.headers.get('content-type')?.toLowerCase().includes('text/event-stream')) { await upstream.body?.cancel(); throw new Error('Upstream did not return SSE'); }
-    const stream = processor(id, route.uid || request.modelUid, chat, write);
-    for await (const event of events(upstream.body)) {
-      await stream.event(event);
-      if (stream.terminal) break;
+    if (!upstream.ok) {
+      classifiedCode = 'upstream_http';
+      await upstream.body?.cancel();
+      throw new Error('Upstream HTTP error');
     }
-    const toolNames = await stream.finish();
+    const contentType = upstream.headers.get('content-type') || '';
+    if (!upstream.body || !contentType.toLowerCase().includes('text/event-stream')) {
+      classifiedCode = 'upstream_content_type';
+      await upstream.body?.cancel();
+      throw new Error('Upstream did not return SSE');
+    }
+
+    async function* rawChunksWithTimeout(bodyStream) {
+      const reader = bodyStream.getReader();
+      try {
+        while (true) {
+          armTimer(idleLimit, 'upstream_timeout');
+          let res;
+          try {
+            res = await reader.read();
+          } catch (err) {
+            if (classifiedCode !== 'upstream_timeout') classifiedCode = 'upstream_stream_error';
+            throw err;
+          } finally {
+            clearTimer();
+          }
+          if (res.done) break;
+          yield res.value;
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    }
+
+    const stream = processor(id, route.uid || request.modelUid, chat, write);
+    try {
+      for await (const event of events(rawChunksWithTimeout(upstream.body))) {
+        await stream.event(event);
+        if (stream.terminal) break;
+      }
+    } catch (err) {
+      if (classifiedCode !== 'upstream_timeout') {
+        const allowedCodes = new Set([
+          'upstream_timeout', 'upstream_http', 'upstream_content_type',
+          'upstream_stream_error', 'upstream_stream_incomplete',
+          'upstream_invalid_tool', 'upstream_invalid_json', 'upstream_network'
+        ]);
+        classifiedCode = allowedCodes.has(err?.code) ? err.code : 'upstream_stream_error';
+      }
+      throw err;
+    }
+
+    let toolNames;
+    try {
+      toolNames = await stream.finish();
+    } catch (err) {
+      classifiedCode = err?.code === 'upstream_invalid_tool' ? 'upstream_invalid_tool' : 'upstream_stream_incomplete';
+      throw err;
+    }
+
     res.end(frame(Buffer.from('{}'), 2));
-    record({ event: 'chat-complete', model: route.model, status, toolNames });
-    return { status, toolNames };
-  } catch {
-    if (controller.signal.aborted || res.destroyed || res.writableEnded) {
+    record({ event: 'chat-complete', model: route.model, status, toolNames, requestId: id });
+    return { status, toolNames, requestId: id };
+  } catch (err) {
+    clearTimer();
+    const isClientCancel = signal?.aborted || res.destroyed || res.writableEnded;
+    if (isClientCancel) {
       record({ event: 'chat-aborted', model: route.model, status });
       if (!res.destroyed && !res.writableEnded) res.destroy();
       return { status, aborted: true };
     }
+
+    let errorText = 'Provider response could not be completed.';
+    if (classifiedCode === 'upstream_http' && status >= 400) {
+      errorText = `Provider returned HTTP ${status}.`;
+    } else if (classifiedCode === 'upstream_content_type' || classifiedCode === 'upstream_invalid_json' || classifiedCode === 'upstream_invalid_tool') {
+      errorText = 'Provider response format is invalid.';
+    }
+
     try {
-      await write(textChunk(id, status >= 400 ? `Provider returned HTTP ${status}.` : 'Provider response could not be completed.'));
+      await write(textChunk(id, errorText));
       await write(stopChunk(id, 13, route.uid || request.modelUid));
       res.end(frame(Buffer.from('{}'), 2));
     } catch {
       if (!res.destroyed && !res.writableEnded) res.destroy();
     }
-    record({ event: 'chat-error', model: route.model, status });
-    return { status, error: true };
+    record({ event: 'chat-error', model: route.model, status, code: classifiedCode, requestId: id });
+    return { status, error: true, code: classifiedCode, requestId: id };
   } finally {
-    controller.abort();
+    clearTimer();
+    upstreamController.abort();
     signal?.removeEventListener('abort', abort);
     res.off('close', close);
   }

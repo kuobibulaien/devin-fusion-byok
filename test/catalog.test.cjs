@@ -4,7 +4,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const { buildCatalog, augmentCatalog, resolveAssignment, collectNativeModels } = require('../src/catalog.cjs');
+const { buildCatalog: buildSavedCatalog, augmentCatalog, resolveAssignment, collectNativeModels } = require('../src/catalog.cjs');
+const { withPresets } = require('./fixtures/presets.cjs');
+const buildCatalog = (config = {}, natives = []) => buildSavedCatalog(withPresets(config, natives), natives);
 const { fields, str, num, s, v, m } = require('../src/protocol/wire.cjs');
 
 const cat = (...parts) => Buffer.concat(parts.flat());
@@ -22,8 +24,11 @@ function config() {
     sidekicks: [{ providerId: 'cpa', model: 'ws-swe-2-max' }, { nativeUid: 'swe-2-max', label: 'SWE-2 Max' }],
   };
 }
-const OBSERVED_SWE = { uid: 'swe-2-max', label: 'SWE-2 Max', disabled: false, isModelRouter: false, harnessUids: ['swe-1p6', 'swe-1p5'] };
-const catalog = buildCatalog(config(), [OBSERVED_SWE]);
+const OBSERVED_SWE = [
+  { uid: 'swe-2-max', label: 'SWE-2 Max', disabled: false, isModelRouter: false, harnessUids: ['swe-1p6', 'swe-1p5'] },
+  { uid: 'fusion-claude-fable-5-1-medium-sidekick-swe-2-max', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 3, name: 'SWE-2 Max' } },
+];
+const catalog = buildCatalog(config(), OBSERVED_SWE);
 const familyEntry = (model, key) => model.json.modelFamilyMetadata.entries.find(entry => entry.key === key).value;
 const getNested = (buffer, ...path) => path.reduce((message, number) => fields(message, number)[0].value, buffer);
 const configs = buffer => fields(buffer, 1).filter(field => field.wire === 2).map(field => field.value);
@@ -38,7 +43,7 @@ test('all provider models and effort variants have every CPA/native Sidekick com
     assert.deepEqual(new Set(combinations.map(fusion => fusion.sidekickNative)), new Set([false, true]));
     for (const fusion of combinations) {
       assert.match(fusion.uid, /^fusion-dfbyok-/);
-      assert.match(fusion.label, /^Fusion \(.+ \+ .+\)$/);
+      assert.match(fusion.label, /^Fixture /);
       assert.equal(catalog.models.find(model => model.uid === fusion.uid).label, fusion.label);
     }
   }
@@ -54,19 +59,17 @@ test('stable model identities and independent Lead/Sidekick orders survive reord
   reordered.providers.reverse();
   reordered.providers.forEach(provider => provider.models.reverse());
   reordered.sidekicks.reverse();
-  const next = buildCatalog(reordered, [OBSERVED_SWE]);
+  const next = buildCatalog(reordered, OBSERVED_SWE);
   assert.deepEqual(new Set(next.models.map(model => model.uid)), new Set(catalog.models.map(model => model.uid)));
   for (const model of catalog.models.filter(model => model.kind === 'fusion')) {
     const same = next.models.find(value => value.uid === model.uid);
     assert.deepEqual(same.json.modelFamilyMetadata, model.json.modelFamilyMetadata);
-    assert.ok(familyEntry(model, 'Lead').order >= 0x10000000);
-    const fusion = catalog.fusions[model.uid];
-    if (fusion.sidekickNative) assert.equal(familyEntry(model, 'Sidekick').order, 3);
-    else assert.ok(familyEntry(model, 'Sidekick').order >= 0x10000000);
+    assert.deepEqual(model.json.modelFamilyMetadata.entries, []);
+    assert.match(model.json.modelInfo.modelFamilyUid, /^dfbyok-preset-family-/);
   }
   const renamed = config();
   renamed.providers[0].name = 'Renamed';
-  assert.deepEqual(new Set(buildCatalog(renamed, [OBSERVED_SWE]).models.map(model => model.uid)), new Set(catalog.models.map(model => model.uid)));
+  assert.deepEqual(new Set(buildCatalog(renamed, OBSERVED_SWE).models.map(model => model.uid)), new Set(catalog.models.map(model => model.uid)));
 });
 
 test('own protobuf metadata matches JSON and advertises required execution harnesses without copying prices', () => {
@@ -109,7 +112,7 @@ test('duplicate labels are disambiguated and invalid provider/Sidekick identitie
 test('explicit inference server override applies to own models and leaves native records byte-identical', () => {
   const input = config();
   input.inferenceServerUrl = 'http://127.0.0.1:39842';
-  const overridden = buildCatalog(input, [OBSERVED_SWE]);
+  const overridden = buildCatalog(input, OBSERVED_SWE);
   for (const model of overridden.models) {
     assert.equal(model.json.modelInfo.inferenceServerUrl, input.inferenceServerUrl);
     assert.equal(str(getNested(model.raw, 23), 18), input.inferenceServerUrl);
@@ -148,11 +151,12 @@ for (const rpc of [lsStatus, seatStatus]) test(`${rpc} appends namespace entries
   assert.deepEqual(fields(output, 99)[0].raw, fields(fixture.body, 99)[0].raw);
   for (const sort of fields(list, 2)) {
     const groups = fields(sort.value, 2);
-    assert.equal(groups.length, 2);
-    assert.equal(str(groups[0].value, 1), 'Devin Fusion BYOK');
-    assert.equal(fields(groups[0].value, 2).length, catalog.models.length);
-    assert.equal(str(groups[1].value, 1), 'Official Group');
-    assert.equal(num(groups[1].value, 90), 4);
+    assert.equal(groups.length, 3);
+    assert.equal(str(groups[0].value, 1), '我的 Fusion');
+    assert.equal(fields(groups[0].value, 2).length, Object.keys(catalog.fusions).length);
+    assert.equal(str(groups[1].value, 1), 'Devin Fusion BYOK');
+    assert.equal(str(groups[2].value, 1), 'Official Group');
+    assert.equal(num(groups[2].value, 90), 4);
     assert.equal(num(sort.value, 91), 5);
   }
   assert.deepEqual(augmentCatalog(output, { rpc, format: proto, catalog }), output);
@@ -179,10 +183,10 @@ test('refresh replaces own old catalog entries while preserving unrelated sort g
   const output = augmentCatalog(input, { rpc: 'GetCascadeModelConfigs', format: proto, catalog });
   assert.equal(configs(output).length, catalog.models.length);
   const groups = fields(getNested(output, 2), 2);
-  assert.equal(groups.length, 2);
-  assert.equal(str(groups[0].value, 1), 'Devin Fusion BYOK');
-  assert.equal(fields(groups[0].value, 2).length, catalog.models.length);
-  assert.equal(str(groups[1].value, 2), 'Unrelated official label');
+  assert.equal(groups.length, 3);
+  assert.equal(str(groups[0].value, 1), '我的 Fusion');
+  assert.equal(fields(groups[0].value, 2).length, Object.keys(catalog.fusions).length);
+  assert.equal(str(groups[2].value, 2), 'Unrelated official label');
   assert.deepEqual(augmentCatalog(output, { rpc: 'GetCascadeModelConfigs', format: proto, catalog }), output);
 });
 
@@ -203,8 +207,8 @@ for (const snake of [false, true]) test(`JSON ${snake ? 'snake' : 'camel'} statu
   assert.deepEqual(list[modelsKey].slice(0, catalog.models.length), catalog.models.map(model => model.json));
   assert.deepEqual(list[modelsKey].at(-1), native);
   assert.equal(list[modelsKey].length, 21);
-  assert.equal(list[sortsKey][0].groups.length, 2);
-  assert.equal(list[sortsKey][0].groups[0].groupName, 'Devin Fusion BYOK');
+  assert.equal(list[sortsKey][0].groups.length, 3);
+  assert.equal(list[sortsKey][0].groups[0].groupName, '我的 Fusion');
   assert.equal(list[sortsKey][0].extra, 1);
   assert.equal(list.extra, 2);
   assert.deepEqual(augmentCatalog(output, { rpc: lsStatus, format: json, catalog }), output);
@@ -382,9 +386,9 @@ for (const format of [proto, json]) test(`${format.json ? 'JSON' : 'protobuf'} a
 const rendererFile = '/Applications/Devin.app/Contents/Resources/app/out/vs/workbench/windsurf-chat-client/index.js';
 test('installed native Fusion grouping includes every custom Lead and both available Sidekicks', { skip: !fs.existsSync(rendererFile) }, () => {
   const source = fs.readFileSync(rendererFile, 'utf8');
-  const start = source.indexOf('function nrM('), end = source.indexOf('let nrG=', start);
+  const start = source.indexOf('function nrP('), end = source.indexOf('let nr$=', start);
   assert.ok(start >= 0 && end > start, 'native family picker extraction anchors');
-  const renderer = vm.runInNewContext(source.slice(start, end) + ';({nrM,nrR,nrF,nrq})');
+  const renderer = vm.runInNewContext(source.slice(start, end) + ';({nrP,nrz,nrV})');
   const models = catalog.models.filter(model => model.kind === 'fusion').map(model => ({
     modelUid: model.uid, label: model.label, disabled: false, familyUid: model.json.modelInfo.modelFamilyUid,
     familyMetadata: Object.fromEntries(model.json.modelFamilyMetadata.entries.map(entry => [entry.key, entry.value])),
@@ -394,32 +398,20 @@ test('installed native Fusion grouping includes every custom Lead and both avail
     Sidekick: { order: 1, name: 'SWE-2 Medium' }, 'Fast Mode': { order: 0, name: '' },
     'Recommended Sidekick': { order: 0, name: 'SWE-2 Medium' },
   } };
-  const family = renderer.nrM([official, ...models]).families.get('fusion');
-  const leadIndex = family.dimensions.findIndex(dimension => dimension.name === 'Lead');
-  const sidekickIndex = family.dimensions.findIndex(dimension => dimension.name === 'Sidekick');
-  const leadOrders = new Set(models.map(model => model.familyMetadata.Lead.order));
-  assert.equal(family.dimensions[leadIndex].values.length, leadOrders.size + 1);
-  for (const order of leadOrders) {
-    assert.equal(renderer.nrF(family, official, leadIndex, order), true);
-    const selected = renderer.nrq(family, official, leadIndex, order);
-    assert.ok(selected.modelUid.startsWith('fusion-dfbyok-'));
-    for (const sidekickOrder of new Set(models.map(model => model.familyMetadata.Sidekick.order))) {
-      assert.equal(renderer.nrF(family, selected, sidekickIndex, sidekickOrder), true);
-      const changed = renderer.nrq(family, selected, sidekickIndex, sidekickOrder);
-      assert.equal(changed.familyMetadata.Sidekick.order, sidekickOrder);
-      assert.equal(changed.familyMetadata.Lead.order, order);
-    }
-  }
+  const rows = renderer.nrV(renderer.nrz([official, ...models]), [], undefined, false);
+  assert.equal(rows.length, models.length + 1);
+  assert.deepEqual(Array.from(rows.slice(1), row => row.model.modelUid), models.map(model => model.modelUid));
+  assert.ok(rows.slice(1).every(row => row.family.models.length === 1));
 });
 
 test('installed ACP picker requires own UIDs in session config_options as well as the user status catalog', { skip: !fs.existsSync(rendererFile) }, () => {
   const source = fs.readFileSync(rendererFile, 'utf8');
-  const start = source.indexOf('function nqD('), end = source.indexOf('nqN.displayName=', start);
+  const start = source.indexOf('function nqj('), end = source.indexOf('nqU.displayName=', start);
   assert.ok(start >= 0 && end > start, 'native ACP option extraction anchors');
-  const renderer = vm.runInNewContext(source.slice(start, end) + ';({nqj})');
-  const filter = source.match(/let e=nqj\(_\.options\);return k\.filter\(t=>e\.has\(t\.modelUid\)\|\|t\.disabled\)/)?.[0];
+  const renderer = vm.runInNewContext(source.slice(start, end) + ';({nqj:nqJ})');
+  const filter = source.match(/let e=nqJ\(_\.options\);return k\.filter\(t=>e\.has\(t\.modelUid\)\|\|t\.disabled\)/)?.[0];
   assert.ok(filter, 'native session/catalog intersection still matches audited code');
-  const select = new Function('nqj', '_', 'k', filter);
+  const select = new Function('nqJ', '_', 'k', filter);
   const models = catalog.models.map(model => ({ modelUid: model.uid, disabled: false }));
   const oldSession = { options: [{ value: 'fusion-official', name: 'Official' }] };
   assert.equal(select(renderer.nqj, oldSession, models).length, 0);
@@ -445,8 +437,8 @@ test('hidden official uids are removed from proto lists while observation still 
   assert.deepEqual(nativeReport[2], { uid: 'swe-2-high', label: 'Shared Label', disabled: false, harnessUids: [], isModelRouter: false });
   assert.deepEqual(fusionReport, { lockedUids: ['fusion-official-locked'], seen: ['fusion-official-locked', 'fusion-official-open'] });
   const groups = fields(getNested(output, 2), 2);
-  assert.equal(str(groups[0].value, 1), 'Devin Fusion BYOK');
-  assert.deepEqual(fields(groups[1].value, 2).map(field => field.value.toString()), ['Shared Label', 'Fusion (Open)']);
+  assert.equal(str(groups[0].value, 1), '我的 Fusion');
+  assert.deepEqual(fields(groups[2].value, 2).map(field => field.value.toString()), ['Shared Label', 'Fusion (Open)']);
   assert.deepEqual(augmentCatalog(output, { rpc: 'GetCascadeModelConfigs', format: proto, catalog: withHidden }), output);
 });
 
@@ -464,8 +456,8 @@ test('hidden official uids are removed from JSON lists including snake_case alia
   assert.deepEqual(report.map(entry => entry.uid), ['fusion-official-locked', 'swe-2-max', 'swe-2-high', 'fusion-official-open']);
   assert.deepEqual(report[0], { uid: 'fusion-official-locked', label: 'Fusion (Locked)', disabled: true, harnessUids: [], isModelRouter: false });
   const groups = output.client_model_sorts[0].groups;
-  assert.equal(groups[0].groupName, 'Devin Fusion BYOK');
-  assert.deepEqual(groups[1].model_labels, ['Shared Label', 'Fusion (Open)']);
+  assert.equal(groups[0].groupName, '我的 Fusion');
+  assert.deepEqual(groups[2].model_labels, ['Shared Label', 'Fusion (Open)']);
   assert.deepEqual(augmentCatalog(output, { rpc: 'GetCascadeModelConfigs', format: json, catalog: withHidden }), output);
 });
 
@@ -644,12 +636,16 @@ test('eligible observed native Sidekicks combine with every imported Lead using 
     { uid: 'dfbyok-own', label: 'Own', disabled: false, isModelRouter: false, harnessUids: ['swe-1p6'] },
     { uid: 'swe-hidden', label: 'Hidden', disabled: false, isModelRouter: false, harnessUids: ['swe-1p6'] },
   ];
-  const result = buildCatalog({ ...input, hiddenNativeModelUids: ['swe-hidden'] }, natives);
+  const officials = [
+    { uid: 'fusion-lead-a-sidekick-swe-2-max', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 3, name: 'SWE-2 Max' } },
+    { uid: 'fusion-lead-a-sidekick-swe-2-medium', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 1, name: 'SWE-2 Medium' } },
+  ];
+  const result = buildCatalog({ ...input, hiddenNativeModelUids: ['swe-hidden'] }, [...natives, ...officials]);
   const nativeSidekicks = result.sidekicks.filter(item => item.native);
   assert.deepEqual(nativeSidekicks.map(item => item.uid).sort(), ['swe-2-max', 'swe-2-medium']);
   const bySidekick = uid => Object.values(result.fusions).find(fusion => fusion.sidekickUid === uid);
-  assert.deepEqual(bySidekick('swe-2-max').sidekickHarnessUids, ['swe-1p6', 'swe-1p5']);
-  assert.deepEqual(bySidekick('swe-2-medium').sidekickHarnessUids, ['swe-1p5']);
+  assert.deepEqual(bySidekick('swe-2-max').sidekickHarnessUids, ['swe-1p6', 'swe-1p5', 'other-harness']);
+  assert.deepEqual(bySidekick('swe-2-medium').sidekickHarnessUids, ['swe-1p5', 'unrelated']);
   for (const uid of ['swe-disabled', 'swe-router', 'swe-naked', 'swe-incompatible', 'fusion-official', 'dfbyok-own', 'swe-hidden', 'swe-ghost']) {
     assert.equal(bySidekick(uid), undefined, uid + ' must not become a Sidekick');
   }
@@ -657,18 +653,14 @@ test('eligible observed native Sidekicks combine with every imported Lead using 
     assert.ok(Object.values(result.fusions).some(fusion => fusion.leadUid === route.uid && fusion.sidekickUid === 'swe-2-max'));
     assert.ok(Object.values(result.fusions).some(fusion => fusion.leadUid === route.uid && fusion.sidekickUid === 'swe-2-medium'));
   }
-  const models = result.models.filter(model => model.kind === 'fusion');
-  const orderOf = uid => familyEntry(models.find(model => model.uid === uid), 'Sidekick').order;
-  assert.equal(orderOf(bySidekick('swe-2-max').uid), 3);
-  const mediumOrder = orderOf(bySidekick('swe-2-medium').uid);
-  assert.ok(mediumOrder !== 3 && mediumOrder >= 0x10000000);
-  const orders = new Set(models.map(model => familyEntry(model, 'Sidekick').order));
-  assert.equal(orders.size, new Set(Object.values(result.fusions).map(fusion => fusion.sidekickUid)).size, 'unique stable orders per Sidekick');
+  assert.equal(result.sidekicks.find(item => item.uid === 'swe-2-max').dimension.order, 3);
+  assert.equal(result.sidekicks.find(item => item.uid === 'swe-2-medium').dimension.order, 1);
+  assert.ok(result.models.filter(model => model.kind === 'fusion').every(model => model.json.modelFamilyMetadata.entries.length === 0));
   const assignedMax = resolveAssignment(cat(s(2, bySidekick('swe-2-max').uid), s(6, bySidekick('swe-2-max').uid)), proto, result);
-  assert.deepEqual(fields(getNested(assignedMax, 1), 3).map(field => field.value.toString()), ['swe-1p6', 'swe-1p5']);
+  assert.deepEqual(fields(getNested(assignedMax, 1), 3).map(field => field.value.toString()), ['swe-1p6', 'swe-1p5', 'other-harness']);
   assert.equal(str(getNested(assignedMax, 1), 2), 'swe-2-max');
   const assignedMedium = resolveAssignment(cat(s(2, bySidekick('swe-2-medium').uid), s(6, bySidekick('swe-2-medium').uid)), proto, result);
-  assert.deepEqual(fields(getNested(assignedMedium, 1), 3).map(field => field.value.toString()), ['swe-1p5']);
+  assert.deepEqual(fields(getNested(assignedMedium, 1), 3).map(field => field.value.toString()), ['swe-1p5', 'unrelated']);
 });
 
 test('config alone never grants native capability and unobserved natives fail closed', () => {
@@ -678,7 +670,7 @@ test('config alone never grants native capability and unobserved natives fail cl
   assert.ok(!unobserved.routes['swe-2-max']);
   const partial = buildCatalog(input, [{ uid: 'swe-2-max', label: 'SWE-2 Max', disabled: false, isModelRouter: false, harnessUids: [] }]);
   assert.equal(Object.values(partial.fusions).filter(fusion => fusion.sidekickNative).length, 0, 'metadata-less natives stay ineligible');
-  const eligible = buildCatalog(input, [OBSERVED_SWE]);
+  const eligible = buildCatalog(input, OBSERVED_SWE);
   const nativeFusion = Object.values(eligible.fusions).find(fusion => fusion.sidekickNative);
   assert.ok(nativeFusion);
   const stale = { ...eligible, fusions: { [nativeFusion.uid]: { ...nativeFusion, sidekickHarnessUids: [] } } };
@@ -718,11 +710,12 @@ test('malformed or ambiguous disabled and router flags never produce a native Si
     assert.equal(record.disabled, true, JSON.stringify(disabled) + ' must fail closed as disabled');
     assert.equal(buildCatalog(config(), [record]).sidekicks.filter(item => item.native).length, 0);
   }
+  const officialSidekick = { uid: 'fusion-lead-a-sidekick-swe-json', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 1, name: 'SWE JSON' } };
   for (const entry of [{ modelUid: 'swe-json', disabled: false, modelInfo: { harnessUids: ['swe-1p6'], isModelRouter: false } },
     { modelUid: 'swe-json', modelInfo: { harnessUids: ['swe-1p6'], isModelRouter: false } }]) {
     const [record] = collectNativeModels({ clientModelConfigs: [entry] }, { rpc: 'GetCliModelConfigs', format: json });
     assert.equal(record.disabled, false);
-    assert.equal(buildCatalog(config(), [record]).sidekicks.filter(item => item.native).length, 1);
+    assert.equal(buildCatalog(config(), [record, officialSidekick]).sidekicks.filter(item => item.native).length, 1);
   }
 });
 
@@ -737,4 +730,208 @@ test('ambiguous user status envelopes drop observation entirely instead of guess
   ]) {
     assert.deepEqual(collectNativeModels(body, { rpc: lsStatus, format: proto }), []);
   }
+});
+
+const dimEntry = (order, name, controlType = 3) => m(2, cat(s(1, 'Sidekick'), m(2, cat(v(1, order), s(2, name), v(3, controlType)))));
+const fam = (...entries) => m(30, cat(s(1, 'Fusion'), ...entries));
+const fusionRecord = (uid, order, name, disabled = 0) =>
+  cat(s(1, 'Official'), s(22, uid), v(4, disabled), m(23, cat(s(20, 'fusion'), v(25, 1))), fam(dimEntry(order, name)));
+
+test('protobuf and JSON collect the official Sidekick dimension only when unambiguous', () => {
+  const base = uid => cat(s(1, 'F'), s(22, uid), fam(dimEntry(4, 'GPT-5.6 Luna High')));
+  assert.deepEqual(collectNativeModels(cat(m(1, base('fusion-a-sidekick-swe-x'))), { rpc: 'GetCliModelConfigs', format: proto })[0].sidekickDimension,
+    { order: 4, name: 'GPT-5.6 Luna High', fastModeOrder: 0 });
+  for (const entry of [
+    cat(s(22, 'a'), fam(dimEntry(1, 'A')), fam(dimEntry(2, 'B'))),
+    cat(s(22, 'b'), s(30, 'not-a-message')),
+    cat(s(22, 'c'), fam(dimEntry(1, 'A'), dimEntry(2, 'B'))),
+    cat(s(22, 'd'), fam(m(2, cat(s(1, 'Sidekick'), m(2, cat(v(1, 1), v(1, 2), s(2, 'A'))))))),
+    cat(s(22, 'e'), fam(m(2, cat(s(1, 'Sidekick'), m(2, cat(v(1, 1), s(2, 'A'), s(2, 'B'))))))),
+    cat(s(22, 'f'), fam(m(2, cat(s(1, 'Sidekick'), s(2, 'wrong-wire'))))),
+    cat(s(22, 'g'), fam(m(2, cat(s(1, 'Sidekick'), m(2, cat(v(1, 1))))))),
+    cat(s(22, 'h'), fam(m(2, cat(v(1, 1), s(2, 'no key?'))))),
+    cat(s(22, 'i'), fam(dimEntry(1, 'A'), m(2, cat(s(1, 'Fast Mode'), m(2, cat(v(1, 0), v(1, 1))))))),
+    cat(s(22, 'j'), fam(dimEntry(1, 'A'), m(2, cat(s(1, 'Fast Mode'), m(2, cat(v(1, 0), s(2, 'x'))))),
+      m(2, cat(s(1, 'Fast Mode'), m(2, cat(v(1, 1), s(2, 'y'))))))),
+  ]) {
+    const [record] = collectNativeModels(cat(m(1, entry)), { rpc: 'GetCliModelConfigs', format: proto });
+    assert.equal(record?.sidekickDimension, undefined, entry ? 'malformed family metadata must not yield a dimension' : '');
+  }
+  const [jsonRecord] = collectNativeModels({ clientModelConfigs: [{ modelUid: 'fusion-a-sidekick-swe-x',
+    modelFamilyMetadata: { entries: [{ key: 'Sidekick', value: { order: 4, name: 'Luna', controlType: 3 } }] } }] },
+    { rpc: 'GetCliModelConfigs', format: json });
+  assert.deepEqual(jsonRecord.sidekickDimension, { order: 4, name: 'Luna', fastModeOrder: 0 });
+  const [snakeRecord] = collectNativeModels({ client_model_configs: [{ model_uid: 'fusion-a-sidekick-swe-x',
+    model_family_metadata: { entries: [{ key: 'Sidekick', value: { order: 5, name: 'Sol', control_type: 3 } }] } }] },
+    { rpc: 'GetCliModelConfigs', format: json });
+  assert.deepEqual(snakeRecord.sidekickDimension, { order: 5, name: 'Sol', fastModeOrder: 0 });
+  for (const modelFamilyMetadata of [
+    { entries: [{ key: 'Sidekick', value: { order: '4', name: 'A' } }] },
+    { entries: [{ key: 'Sidekick', value: { order: -1, name: 'A' } }] },
+    { entries: [{ key: 'Sidekick', value: { order: 4, name: '' } }] },
+    { entries: [{ key: 'Sidekick', value: { order: 4, name: 'A' } }, { key: 'Sidekick', value: { order: 4, name: 'A' } }] },
+    { entries: [{ key: 'Sidekick', value: { order: 4, name: 'A', controlType: 3, control_type: 2 } }] },
+    { entries: 'nope' }, 'nope',
+  ]) {
+    const [record] = collectNativeModels({ clientModelConfigs: [{ modelUid: 'fusion-a-sidekick-swe-x', modelFamilyMetadata }] },
+      { rpc: 'GetCliModelConfigs', format: json });
+    assert.equal(record.sidekickDimension, undefined);
+  }
+});
+
+test('official Sidekick bindings give canonical dimension and full harness; conflicts fail closed', () => {
+  const natives = [
+    { uid: 'swe-2-high', label: 'SWE-2 High', disabled: false, isModelRouter: false, harnessUids: ['swe-1p6', 'swe-1p5'] },
+    { uid: 'gpt-5-6-luna-high', label: 'GPT-5.6 Luna High Thinking', disabled: false, isModelRouter: false, harnessUids: ['gpt-5p6'] },
+    { uid: 'swe-2-max', label: 'SWE-2 Max', disabled: false, isModelRouter: false, harnessUids: ['swe-1p6', 'swe-1p5'] },
+    { uid: 'swe-odd', label: 'Odd', disabled: false, isModelRouter: false, harnessUids: ['odd-harness'] },
+  ];
+  const officials = [
+    { uid: 'fusion-lead-a-sidekick-swe-2-high', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 2, name: 'SWE-2 High' } },
+    { uid: 'fusion-lead-b-sidekick-swe-2-high', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 2, name: 'SWE-2 High' } },
+    { uid: 'fusion-lead-a-sidekick-gpt-5-6-luna-high', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 4, name: 'GPT-5.6 Luna High' } },
+    { uid: 'fusion-lead-a-sidekick-swe-2-max', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 3, name: 'SWE-2 Max' } },
+    { uid: 'fusion-lead-a-sidekick-swe-odd', label: 'F', disabled: true, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 9, name: 'Odd' } },
+    { uid: 'fusion-sidekick-swe-2-high', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'] },
+    { uid: 'fusion-dfbyok-own-sidekick-gpt-5-6-luna-high', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 8, name: 'Ignored Own' } },
+  ];
+  const result = buildCatalog(config(), [...natives, ...officials]);
+  const sidekick = uid => result.sidekicks.find(item => item.uid === uid);
+  assert.deepEqual(sidekick('swe-2-high').dimension, { order: 2, name: 'SWE-2 High' });
+  assert.deepEqual(sidekick('gpt-5-6-luna-high').dimension, { order: 4, name: 'GPT-5.6 Luna High' });
+  assert.deepEqual(sidekick('gpt-5-6-luna-high').harnessUids, ['gpt-5p6'], 'bound + enabled official combo unlocks the declared harness');
+  assert.deepEqual(sidekick('swe-2-high').harnessUids, ['swe-1p6', 'swe-1p5']);
+  assert.equal(sidekick('swe-odd'), undefined, 'a disabled official pairing does not unlock an unfamiliar harness');
+  const models = result.models.filter(model => model.kind === 'fusion');
+  const orderOf = uid => result.sidekicks.find(item => item.uid === uid).dimension.order;
+  assert.equal(orderOf('swe-2-high'), 2);
+  assert.equal(orderOf('gpt-5-6-luna-high'), 4);
+  assert.equal(orderOf('swe-2-max'), 3, 'legacy order stays only while no official binding claims it');
+  const fusion = Object.values(result.fusions).find(item => item.sidekickUid === 'gpt-5-6-luna-high');
+  assert.deepEqual(fusion.sidekickHarnessUids, ['gpt-5p6']);
+  const luna = models.find(model => model.uid === fusion.uid);
+  assert.equal(sidekick('gpt-5-6-luna-high').dimension.name, 'GPT-5.6 Luna High', 'canonical dimension name remains available for role candidates');
+  assert.deepEqual(luna.json.modelFamilyMetadata.entries, []);
+  const conflicts = buildCatalog(config(), [...natives,
+    { uid: 'fusion-lead-a-sidekick-swe-2-max', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 3, name: 'SWE-2 Max' } },
+    { uid: 'fusion-a-sidekick-swe-2-high', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 2, name: 'SWE-2 High' } },
+    { uid: 'fusion-b-sidekick-swe-2-high', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 7, name: 'Renamed' } }]);
+  const high = conflicts.sidekicks.find(item => item.uid === 'swe-2-high');
+  assert.equal(high, undefined, 'conflicting bindings discard the borrowed dimension and candidate');
+  const conflicted = buildCatalog(config(), [...natives,
+    { uid: 'fusion-lead-a-sidekick-swe-2-max', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 3, name: 'SWE-2 Max' } },
+    { uid: 'fusion-a-sidekick-gpt-5-6-luna-high', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 4, name: 'Luna' } },
+    { uid: 'fusion-b-sidekick-swe-2-high', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 4, name: 'Squatter' } }]);
+  assert.equal(conflicted.sidekicks.find(item => item.uid === 'gpt-5-6-luna-high'), undefined,
+    'an order claimed by two natives unlocks neither the dimension nor the unfamiliar harness');
+  const claimedThree = buildCatalog(config(), [...natives,
+    { uid: 'fusion-lead-a-sidekick-swe-2-max', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 3, name: 'SWE-2 Max' } },
+    { uid: 'fusion-a-sidekick-swe-odd', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 3, name: 'Odd' } }]);
+  assert.equal(claimedThree.sidekicks.find(item => item.uid === 'swe-2-max'), undefined,
+    'contested order 3 drops swe-2-max eligibility');
+});
+
+test('sanitized real catalog entries yield canonical orders and exact harnesses through proto observation', () => {
+  const fixture = JSON.parse(fs.readFileSync(__dirname + '/fixtures/real-picker-0.3.11.json', 'utf8'));
+  const protoFamily = family => m(30, cat(s(1, 'Fusion'), ...(family || []).map(dim =>
+    m(2, cat(s(1, dim.key), m(2, cat(v(1, dim.order), s(2, dim.name), v(3, dim.controlType ?? 0))))))));
+  const entry = record => cat(s(1, record.label), s(22, record.uid), v(4, record.disabled ? 1 : 0),
+    m(23, cat(...(record.harnesses || []).map(harness => s(20, harness)), v(25, record.router ? 1 : 0))), protoFamily(record.family));
+  const records = collectNativeModels(cat(...[...fixture.natives, ...fixture.fusions].map(record => m(1, entry(record)))),
+    { rpc: 'GetCliModelConfigs', format: proto });
+  const result = buildCatalog(config(), records);
+  const expected = { 'swe-2-medium': 1, 'swe-2-high': 2, 'gpt-5-6-luna-high': 4, 'gpt-5-6-sol-high': 5, 'glm-5-2': 6 };
+  const models = result.models.filter(model => model.kind === 'fusion');
+  for (const [uid, order] of Object.entries(expected)) {
+    const fusion = models.find(model => result.fusions[model.uid]?.sidekickUid === uid);
+    assert.ok(fusion, uid + ' must generate a native combination');
+    assert.equal(result.sidekicks.find(item => item.uid === uid).dimension.order, order, uid + ' retains its canonical binding');
+    assert.deepEqual(fusion.json.modelFamilyMetadata.entries, []);
+  }
+  assert.deepEqual(result.fusions[models.find(model => result.fusions[model.uid]?.sidekickUid === 'gpt-5-6-luna-high').uid].sidekickHarnessUids, ['gpt-5p6']);
+  assert.deepEqual(result.fusions[models.find(model => result.fusions[model.uid]?.sidekickUid === 'glm-5-2').uid].sidekickHarnessUids, ['strawberry-pancake']);
+  assert.equal(result.sidekicks.find(item => item.uid === 'gpt-5-6-luna-high-priority'), undefined,
+    'the -priority twin is never bound through ambiguous suffixes');
+});
+
+test('the installed picker selects every canonical native Sidekick on generated combinations', { skip: !fs.existsSync(rendererFile) }, () => {
+  const source = fs.readFileSync(rendererFile, 'utf8');
+  const start = source.indexOf('function nrP('), end = source.indexOf('let nr$=', start);
+  assert.ok(start >= 0 && end > start, 'native picker anchors');
+  const picker = vm.runInNewContext(source.slice(start, end) + ';({nrP,nrz,nrV})');
+  const fixture = JSON.parse(fs.readFileSync(__dirname + '/fixtures/real-picker-0.3.11.json', 'utf8'));
+  const protoFamily = family => m(30, cat(s(1, 'Fusion'), ...(family || []).map(dim =>
+    m(2, cat(s(1, dim.key), m(2, cat(v(1, dim.order), s(2, dim.name), v(3, dim.controlType ?? 0))))))));
+  const entry = record => cat(s(1, record.label), s(22, record.uid), v(4, record.disabled ? 1 : 0),
+    m(23, cat(...(record.harnesses || []).map(harness => s(20, harness)), v(25, record.router ? 1 : 0))), protoFamily(record.family));
+  const records = collectNativeModels(cat(...[...fixture.natives, ...fixture.fusions].map(record => m(1, entry(record)))),
+    { rpc: 'GetCliModelConfigs', format: proto });
+  const result = buildCatalog(config(), records);
+  const pickerModel = model => ({ modelUid: model.uid, label: model.label, disabled: false, familyUid: model.json.modelInfo.modelFamilyUid,
+    familyMetadata: Object.fromEntries(model.json.modelFamilyMetadata.entries.map(item => [item.key, { order: item.value.order, name: item.value.name }])) });
+  const officialModel = record => ({ modelUid: record.uid, label: record.label, disabled: !!record.disabled, familyUid: 'fusion',
+    familyMetadata: Object.fromEntries((record.family || []).map(dim => [dim.key, { order: dim.order, name: dim.name }])) });
+  const models = [...fixture.fusions.map(officialModel), ...result.models.filter(model => model.kind === 'fusion').map(pickerModel)];
+  const rows = picker.nrV(picker.nrz(models), [], undefined, false);
+  for (const uid of ['swe-2-medium', 'swe-2-high', 'gpt-5-6-luna-high', 'gpt-5-6-sol-high', 'glm-5-2']) {
+    const row = rows.find(row => result.fusions[row.model.modelUid]?.sidekickUid === uid);
+    assert.ok(row && !row.model.disabled, uid + ' saved preset is selectable');
+    assert.equal(resolveAssignment({ fusionLeadRouterUid: row.model.modelUid }, json, result).assignment.modelUid, uid);
+  }
+});
+
+test('Fast Mode dimension parses strictly and FastMode variants never bind', () => {
+  const withFast = (fastOrder, extra = '') => cat(s(1, 'F'), s(22, 'fusion-a-sidekick-swe-x'),
+    fam(dimEntry(4, 'Luna'), m(2, cat(s(1, 'Fast Mode'), m(2, cat(v(1, fastOrder), s(2, extra), v(3, 2)))))));
+  assert.deepEqual(collectNativeModels(cat(m(1, withFast(0))), { rpc: 'GetCliModelConfigs', format: proto })[0].sidekickDimension,
+    { order: 4, name: 'Luna', fastModeOrder: 0 });
+  assert.deepEqual(collectNativeModels(cat(m(1, withFast(1))), { rpc: 'GetCliModelConfigs', format: proto })[0].sidekickDimension,
+    { order: 4, name: 'Luna', fastModeOrder: 1 });
+  const noFast = cat(s(1, 'F'), s(22, 'fusion-a-sidekick-swe-x'), fam(dimEntry(4, 'Luna'), m(2, cat(s(1, 'Fast Mode'), m(2, cat(v(1, 0)))))));
+  assert.deepEqual(collectNativeModels(cat(m(1, noFast)), { rpc: 'GetCliModelConfigs', format: proto })[0].sidekickDimension,
+    { order: 4, name: 'Luna', fastModeOrder: 0 }, 'a nameless Fast Mode entry still counts');
+  const natives = [{ uid: 'swe-fast', label: 'F', disabled: false, isModelRouter: false, harnessUids: ['gpt-5p6'] }];
+  const bound = buildCatalog(config(), [...natives,
+    { uid: 'fusion-a-sidekick-swe-fast', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'],
+      sidekickDimension: { order: 4, name: 'F', fastModeOrder: 1 } }]);
+  assert.equal(bound.sidekicks.find(item => item.uid === 'swe-fast'), undefined,
+    'a Fast Mode variant is excluded from canonical claims even with an exact suffix');
+});
+
+test('suffix binding is exact: invented tails never bind the base uid', () => {
+  const natives = [{ uid: 'gpt-5-6-luna-high', label: 'L', disabled: false, isModelRouter: false, harnessUids: ['gpt-5p6'] }];
+  const invented = buildCatalog(config(), [...natives,
+    { uid: 'fusion-a-sidekick-gpt-5-6-luna-high-invented', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'],
+      sidekickDimension: { order: 4, name: 'Luna' } }]);
+  assert.equal(invented.sidekicks.find(item => item.uid === 'gpt-5-6-luna-high'), undefined,
+    'an unknown suffix tail must not grant the base uid unfamiliar-harness eligibility');
+});
+
+test('order and uid claim conflicts poison both the uids and the contested orders', () => {
+  const natives = ['swe-a', 'swe-b', 'swe-c', 'swe-d', 'swe-2-max'].map(uid =>
+    ({ uid, label: uid, disabled: false, isModelRouter: false, harnessUids: uid === 'swe-2-max' ? ['swe-1p6', 'swe-1p5'] : ['odd-' + uid] }));
+  const bind = (fusionUid, order, name, disabled = false) =>
+    ({ uid: fusionUid, label: 'F', disabled, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order, name } });
+  const maxOfficial = bind('fusion-lead-a-sidekick-swe-2-max', 3, 'SWE-2 Max');
+  const threeClaimers = buildCatalog(config(), [...natives, maxOfficial,
+    bind('fusion-x-sidekick-swe-a', 9, 'A'), bind('fusion-y-sidekick-swe-b', 9, 'B'), bind('fusion-z-sidekick-swe-c', 9, 'C')]);
+  for (const uid of ['swe-a', 'swe-b', 'swe-c'])
+    assert.equal(threeClaimers.sidekicks.find(item => item.uid === uid), undefined, uid + ' shares a contested order');
+  const orderNineLater = buildCatalog(config(), [...natives, maxOfficial,
+    bind('fusion-x-sidekick-swe-a', 9, 'A'), bind('fusion-y-sidekick-swe-b', 9, 'B'),
+    bind('fusion-w-sidekick-swe-d', 9, 'D')]);
+  assert.equal(orderNineLater.sidekicks.find(item => item.uid === 'swe-d'), undefined,
+    'a poisoned order never becomes claimable by a later contender');
+  const uidConflict = buildCatalog(config(), [...natives, maxOfficial,
+    bind('fusion-x-sidekick-swe-a', 9, 'A'), bind('fusion-y-sidekick-swe-a', 11, 'B'),
+    bind('fusion-z-sidekick-swe-d', 11, 'B')]);
+  assert.equal(uidConflict.sidekicks.find(item => item.uid === 'swe-a'), undefined, 'inconsistent claims conflict the uid');
+  assert.equal(uidConflict.sidekicks.find(item => item.uid === 'swe-d'), undefined,
+    'an order touched by a conflicting uid poisons unrelated claimers at that order');
+  const maxModel = uidConflict.models.find(model => model.kind === 'fusion' && uidConflict.fusions[model.uid].sidekickUid === 'swe-2-max');
+  const poisonedThree = buildCatalog(config(), [...natives,
+    bind('fusion-x-sidekick-swe-a', 3, 'A'), bind('fusion-y-sidekick-swe-b', 3, 'B')]);
+  assert.equal(poisonedThree.sidekicks.find(item => item.uid === 'swe-2-max'), undefined,
+    'unpaired swe-2-max cannot join sidekicks without an official pairing');
+  assert.ok(maxModel && uidConflict.sidekicks.find(item => item.uid === 'swe-2-max').dimension.order === 3, 'swe-2-max keeps canonical order 3 when officially bound');
 });

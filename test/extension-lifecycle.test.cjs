@@ -44,6 +44,7 @@ function fixture(t, initial = {}) {
   const spawns = [];
   let fetchImpl = async () => new Response(JSON.stringify({ ...identity, draining: false }));
   let injectionGate = null;
+  let nativeRead = async () => ({ status: 'empty', models: [] });
   const overrides = {
     vscode,
     'node:fs': { ...fs, watchFile: (_file, _options, callback) => watchers.push(callback), unwatchFile: () => {} },
@@ -57,8 +58,9 @@ function fixture(t, initial = {}) {
       writeConfig: (file, value) => fs.writeFileSync(file, JSON.stringify(value)),
       importLegacy: () => ({}), discover: async () => 2, updateSidekicks() {},
     },
-    './catalog.cjs': { buildCatalog: config => ({ models: config.providers?.length ? ['own'] : [],
+    './catalog.cjs': { normalizeFusionConfig: config => config, buildCatalog: config => ({ models: config.providers?.length ? ['own'] : [],
       fusions: config.providers?.length ? { 'fusion-dfbyok-selected': { label: 'CPA Fusion' }, 'fusion-dfbyok-another': { label: 'CPA Fusion Alt' } } : {} }) },
+    './runtime/native-models.cjs': { readNativeModels: options => nativeRead(options) },
     './runtime/backend.cjs': { runtimeIdentity: () => identity, controlFile: actualBackend.controlFile, PORT: 39842, MANAGEMENT_PROTOCOL: 1 },
     './runtime/bridge.cjs': { createLsBridge: async (_port, options) => { bridges.push(options); return { port: 4567, close() {} }; } },
     './runtime/ls-injection.cjs': { installLsInjection: async options => {
@@ -73,7 +75,7 @@ function fixture(t, initial = {}) {
   };
   const module = { exports: {} };
   vm.runInNewContext(fs.readFileSync(filename, 'utf8'), { module, exports: module.exports, process,
-    AbortController, AbortSignal, setTimeout: (fn, _ms) => setTimeout(fn, 0), clearTimeout,
+    AbortController, AbortSignal, setInterval, clearInterval, setTimeout: (fn, _ms) => setTimeout(fn, 0), clearTimeout,
     fetch: (...args) => fetchImpl(...args),
     require: name => Object.hasOwn(overrides, name) ? overrides[name] : realRequire(name),
   }, { filename });
@@ -83,6 +85,7 @@ function fixture(t, initial = {}) {
   return { ...module.exports, context, root, configFile, globals, state, commands, logs, notices, watchers, updates, bridges,
     preferenceListeners, managerOptions: () => managerOptions, spawns,
     setFetch: impl => { fetchImpl = impl; },
+    setNativeRead: impl => { nativeRead = impl; },
     gateInjection: () => { let release; injectionGate = new Promise(resolve => { release = resolve; }); return release; },
     firePreference: (key = 'devin.acp.agentPreferences') => Promise.all(preferenceListeners.map(fn => fn({ affectsConfiguration: name => name === key }))),
     settle: async (ticks = 20) => { for (let index = 0; index < ticks; index++) await next(); },
@@ -384,4 +387,31 @@ test('unloading while LS injection is deferred disposes the late connection inst
   f.watchers[0]();
   await f.settle();
   assert.equal(f.counts().installed, 1, 'no resurrection after unload');
+});
+
+test('backend sync hydrates the actual extension manager without LS observations and replaces empty snapshots', async t => {
+  const f = fixture(t);
+  const record = { uid: 'swe-2-high', label: 'SWE-2 High', disabled: false, isModelRouter: false, harnessUids: ['swe-1p6'] };
+  const official = { uid: 'fusion-lead-a-sidekick-swe-2-high', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'],
+    sidekickDimension: { order: 2, name: 'SWE-2 High' } };
+  f.setNativeRead(async () => ({ status: 'ready', models: [record, official] }));
+  await f.activate(f.context); await f.settle();
+  const manager = realRequire('./panel/model.cjs').createManager(f.managerOptions());
+  const state = await manager.dispatch('ready');
+  assert.equal(state.nativeCatalogStatus, 'ready');
+  const sweRow = state.nativeModels.find(m => m.uid === record.uid);
+  assert.ok(sweRow);
+  assert.equal(sweRow.eligible, true);
+  f.setNativeRead(async () => ({ status: 'empty', models: [] }));
+  assert.equal((await manager.dispatch('refreshNativeModels')).nativeModels.length, 0);
+});
+
+test('late backend sync cannot publish after unload', async t => {
+  const f = fixture(t); let release;
+  f.setNativeRead(() => new Promise(resolve => { release = resolve; }));
+  await f.activate(f.context); await f.settle();
+  await f.deactivate();
+  release({ status: 'ready', models: [{ uid: 'late', label: 'Late', disabled: false, isModelRouter: false, harnessUids: [] }] });
+  await f.settle();
+  assert.equal(f.managerOptions().nativeModels().length, 0);
 });

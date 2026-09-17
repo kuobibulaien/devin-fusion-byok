@@ -19,8 +19,8 @@ function importLegacy() {
       apiFormat: p.type === 'openai-responses' ? 'openai-responses' : 'openai',
       models: (p.models || []).map(m => ({ id: m.id, label: m.name || m.id, efforts: m.effortLevels || [], contextWindow: 272000, maxOutputTokens: 32768 }))
     }));
-    return { enabled: true, providers, sidekicks: [] };
-  } catch { return { enabled: true, providers: [], sidekicks: [] }; }
+    return { enabled: true, providers, sidekicks: [], roleExclusions: { lead: [], sidekick: [] } };
+  } catch { return { enabled: true, providers: [], sidekicks: [], roleExclusions: { lead: [], sidekick: [] } }; }
 }
 async function discover(provider) {
   const url = new URL(provider.baseUrl.replace(/\/$/, '') + '/models');

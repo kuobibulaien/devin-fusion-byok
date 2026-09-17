@@ -1,6 +1,6 @@
 'use strict';
 const { randomUUID } = require('node:crypto');
-const { buildCatalog } = require('../catalog.cjs');
+const { buildCatalog, buildRoleLists, refKey, presetUid, normalizeFusionConfig } = require('../catalog.cjs');
 const { discover: discoverModels } = require('../config.cjs');
 const { modelSupportsImages } = require('../model-capabilities.cjs');
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
@@ -45,8 +45,8 @@ function cleanSidekicks(config) {
       provider.models.some(model => model.id === sidekick?.model && model.enabled !== false)));
   config.sidekicks = valid;
 }
-function publicState(config, selectedFusionUid, nativeModels = []) {
-  const catalog = buildCatalog(config, nativeModels);
+function publicState(config, selectedFusionUid, nativeModels = [], autoContinueStatus = 'unavailable') {
+  const catalog = buildCatalog({ ...config, enabled: true }, nativeModels);
   const hidden = new Set(catalog.hiddenNativeModelUids || []);
   const eligible = new Set(catalog.sidekicks.filter(sidekick => sidekick.native).map(sidekick => sidekick.uid));
   const observed = new Set();
@@ -58,6 +58,7 @@ function publicState(config, selectedFusionUid, nativeModels = []) {
       disabled: entry.disabled === true, hidden: hidden.has(entry.uid), eligible: eligible.has(entry.uid) });
   }
   for (const uid of hidden) if (!observed.has(uid)) natives.push({ uid, label: uid, disabled: false, hidden: true, eligible: false });
+  const roleLists = buildRoleLists(config, nativeModels);
   return {
     enabled: config.enabled !== false,
     providers: config.providers.map(provider => ({ id: provider.id, name: provider.name, baseUrl: provider.baseUrl,
@@ -68,19 +69,27 @@ function publicState(config, selectedFusionUid, nativeModels = []) {
         supportsImages: modelSupportsImages(model) })) })),
     sidekicks: catalog.sidekicks.map(sidekick => sidekick.native
       ? { nativeUid: sidekick.uid, label: sidekick.label } : { providerId: sidekick.providerId, model: sidekick.model }),
-    selectedFusionUid,
+    roleLists,
+    fusionPresets: catalog.presetStates || [],
+    presetCandidates: catalog.presetCandidates || { lead: [], sidekick: [] },
+    migrationPending: !!catalog.migrationPending,
+    selectedFusionUid: catalog.migratedFrom === selectedFusionUid ? catalog.defaultFusionUid : selectedFusionUid,
     nativeModels: natives,
     modelCount: Object.keys(catalog.routes).length,
     fusionCount: Object.keys(catalog.fusions).length,
     fusionChoices: Object.values(catalog.fusions).map(fusion => ({ uid: fusion.uid, label: fusion.label })),
+    autoContinueOnProviderError: config.autoContinueOnProviderError === true,
+    autoContinueUntilPlanComplete: config.autoContinueUntilPlanComplete === true,
+    autoContinueStatus: typeof autoContinueStatus === 'string' ? autoContinueStatus : 'unavailable',
   };
 }
-function createManager({ read, write, discover = discoverModels, afterChange = async () => {}, selectFusion = async () => {}, selectedFusion = () => '', nativeModels = () => [] }) {
+function createManager({ read, write, discover = discoverModels, afterChange = async () => {}, selectFusion = async () => {}, selectedFusion = () => '', nativeModels = () => [], refreshNativeModels = async () => {}, nativeCatalogStatus = () => 'empty', autoContinueStatus = () => 'unavailable' }) {
   let queue = Promise.resolve();
   let pendingImport;
   const signature = provider => JSON.stringify([provider.id, provider.baseUrl, provider.apiFormat, provider.apiKey]);
   const state = () => {
-    const config = read(), result = publicState(config, selectedFusion(), nativeModels());
+    const config = read(), result = publicState(config, selectedFusion(), nativeModels(), autoContinueStatus());
+    result.nativeCatalogStatus = nativeCatalogStatus();
     const provider = config.providers.find(p => p.id === pendingImport?.providerId);
     result.importCandidates = provider && signature(provider) === pendingImport.signature ? {
       providerId: provider.id, token: pendingImport.token,
@@ -91,14 +100,43 @@ function createManager({ read, write, discover = discoverModels, afterChange = a
   };
   async function apply(type, payload = {}) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) fail('操作参数无效。');
-    if (type === 'ready') return state();
-    let config = read();
+    if (type === 'ready' || type === 'refreshNativeModels') { await refreshNativeModels(); return state(); }
+    let config = normalizeFusionConfig(read(), nativeModels());
     if (type === 'selectFusion') {
       if (config.enabled === false) fail('请先启用 Fusion BYOK。');
       if (!own(buildCatalog(config, nativeModels()).fusions, payload.uid)) fail('该 Fusion 组合已不可用，请重新选择。');
       await selectFusion(payload.uid); return state();
     }
     switch (type) {
+      case 'saveFusionPreset': {
+        if (config.enabled === false) fail('请先启用插件再编辑预设。');
+        const presets = Array.isArray(config.fusionPresets) ? config.fusionPresets : [];
+        const existing = payload.id ? presets.find(item => item.id === payload.id) : null;
+        if (payload.id && !existing) fail('该预设已不存在，请刷新面板。');
+        const name = text(payload.name, '预设名称', 80);
+        if (presets.some(item => item !== existing && item.name?.trim().toLowerCase() === name.toLowerCase())) fail('预设名称不能重复。');
+        const candidates = buildCatalog(config, nativeModels()).presetCandidates;
+        const references = {};
+        for (const role of ['lead', 'sidekick']) {
+          const ref = payload[role];
+          if (!refKey(ref) || ref.nativeUid && own(ref, 'effort')) fail(role + ' 模型参数无效。');
+          const clean = ref.nativeUid ? { nativeUid: ref.nativeUid } : { providerId: ref.providerId, model: ref.model, effort: ref.effort ?? null };
+          const match = candidates[role].find(item => refKey(item.ref) === refKey(clean) && (item.ref.effort ?? null) === (clean.effort ?? null));
+          const unchanged = existing && refKey(existing[role]) === refKey(clean) && (existing[role].effort ?? null) === (clean.effort ?? null);
+          if (!match && !unchanged) fail(role + ' 当前不可用，请重新选择。');
+          references[role] = clean;
+        }
+        const preset = { id: existing?.id || randomUUID(), name, ...references };
+        config.fusionPresets = existing ? presets.map(item => item === existing ? preset : item) : [...presets, preset];
+        break;
+      }
+      case 'deleteFusionPreset': {
+        const presets = Array.isArray(config.fusionPresets) ? config.fusionPresets : [];
+        if (!presets.some(item => item.id === payload.id)) fail('该预设已不存在。');
+        config.fusionPresets = presets.filter(item => item.id !== payload.id);
+        if (config.defaultFusionUid === presetUid(payload.id)) delete config.defaultFusionUid;
+        break;
+      }
       case 'saveProvider': {
         const existing = payload.id ? providerAt(config, payload.id) : null;
         const name = text(payload.name, '供应商名称', 80), url = baseUrl(payload.baseUrl);
@@ -188,7 +226,39 @@ function createManager({ read, write, discover = discoverModels, afterChange = a
         else config.hiddenNativeModelUids = list.filter(value => value !== uid);
         break;
       }
+      case 'setRoleModel': {
+        const role = payload.role;
+        if (role !== 'lead' && role !== 'sidekick') fail('角色类型无效。');
+        const enabled = boolean(payload.enabled, '启用状态');
+        const model = payload.model;
+        if (!model || typeof model !== 'object' || Array.isArray(model)) fail('模型参数无效。');
+        const hasNative = typeof model.nativeUid === 'string' && !!model.nativeUid;
+        const hasProvider = typeof model.providerId === 'string' && typeof model.model === 'string' && !!model.providerId && !!model.model;
+        if ((hasNative && hasProvider) || (!hasNative && !hasProvider)) fail('模型身份无效。');
+        const key = refKey(model);
+        if (!key) fail('模型标识无效。');
+
+        const currentRoles = buildRoleLists(config, nativeModels());
+        const candidateList = currentRoles[role] || [];
+        const candidate = candidateList.find(item => refKey(item.ref) === key);
+        if (enabled && (!candidate || !candidate.available)) fail('该模型当前不可用，无法添加。');
+
+        if (!config.roleExclusions) config.roleExclusions = { lead: [], sidekick: [] };
+        if (!Array.isArray(config.roleExclusions[role])) config.roleExclusions[role] = [];
+
+        const refToStore = hasNative ? { nativeUid: model.nativeUid } : { providerId: model.providerId, model: model.model };
+        if (enabled) {
+          config.roleExclusions[role] = config.roleExclusions[role].filter(r => refKey(r) !== key);
+        } else {
+          if (!config.roleExclusions[role].some(r => refKey(r) === key)) {
+            config.roleExclusions[role].push(refToStore);
+          }
+        }
+        break;
+      }
       case 'setEnabled': config.enabled = boolean(payload.enabled, '启用状态'); break;
+      case 'setAutoContinue': config.autoContinueOnProviderError = boolean(payload.enabled, '自动继续'); break;
+      case 'setAutoContinueUntilPlanComplete': config.autoContinueUntilPlanComplete = boolean(payload.enabled, '完成待办时自动继续'); break;
       default: fail('不支持的操作。');
     }
     cleanSidekicks(config);

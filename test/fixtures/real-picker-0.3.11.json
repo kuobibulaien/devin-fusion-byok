@@ -1,0 +1,608 @@
+{
+  "cacheTime": "2026-09-16T16:01:47.469Z",
+  "source": "sanitized real cache subset for 0.3.11 picker verification",
+  "natives": [
+    {
+      "uid": "claude-fable-5-1-medium",
+      "label": "Claude Fable 5.1 Medium",
+      "disabled": 0,
+      "harnesses": [
+        "strawberry-pancake"
+      ],
+      "router": 0,
+      "family": [
+        {
+          "key": "Effort",
+          "order": 1,
+          "name": "Medium"
+        },
+        {
+          "key": "Thinking",
+          "order": 1,
+          "name": ""
+        },
+        {
+          "key": "Fast Mode",
+          "order": 0,
+          "name": ""
+        },
+        {
+          "key": "1M Context",
+          "order": 0,
+          "name": ""
+        }
+      ]
+    },
+    {
+      "uid": "glm-5-2",
+      "label": "GLM-5.2 High",
+      "disabled": 0,
+      "harnesses": [
+        "strawberry-pancake"
+      ],
+      "router": 0,
+      "family": [
+        {
+          "key": "Effort",
+          "order": 1,
+          "name": "High"
+        },
+        {
+          "key": "1M Context",
+          "order": 0,
+          "name": ""
+        }
+      ]
+    },
+    {
+      "uid": "swe-2-high",
+      "label": "SWE-2 High",
+      "disabled": 0,
+      "harnesses": [
+        "swe-1p6",
+        "swe-1p5"
+      ],
+      "router": 0,
+      "family": [
+        {
+          "key": "Reasoning Effort",
+          "order": 1,
+          "name": "High"
+        }
+      ]
+    },
+    {
+      "uid": "adaptive",
+      "label": "Adaptive",
+      "disabled": 0,
+      "harnesses": [],
+      "router": 1,
+      "family": []
+    },
+    {
+      "uid": "gpt-5-6-sol-high",
+      "label": "GPT-5.6 Sol High Thinking",
+      "disabled": 0,
+      "harnesses": [
+        "gpt-5p6"
+      ],
+      "router": 0,
+      "family": [
+        {
+          "key": "Reasoning Effort",
+          "order": 3,
+          "name": "High"
+        },
+        {
+          "key": "Fast Mode",
+          "order": 0,
+          "name": ""
+        },
+        {
+          "key": "Prompt Cache Retention",
+          "order": 1,
+          "name": "24h"
+        }
+      ]
+    },
+    {
+      "uid": "gpt-5-6-sol-high-priority",
+      "label": "GPT-5.6 Sol High Thinking Fast",
+      "disabled": 0,
+      "harnesses": [
+        "gpt-5p6"
+      ],
+      "router": 0,
+      "family": [
+        {
+          "key": "Reasoning Effort",
+          "order": 3,
+          "name": "High"
+        },
+        {
+          "key": "Fast Mode",
+          "order": 1,
+          "name": ""
+        },
+        {
+          "key": "Prompt Cache Retention",
+          "order": 1,
+          "name": "24h"
+        }
+      ]
+    },
+    {
+      "uid": "gpt-5-6-luna-high",
+      "label": "GPT-5.6 Luna High Thinking",
+      "disabled": 0,
+      "harnesses": [
+        "gpt-5p6"
+      ],
+      "router": 0,
+      "family": [
+        {
+          "key": "Reasoning Effort",
+          "order": 3,
+          "name": "High"
+        },
+        {
+          "key": "Fast Mode",
+          "order": 0,
+          "name": ""
+        },
+        {
+          "key": "Prompt Cache Retention",
+          "order": 1,
+          "name": "24h"
+        }
+      ]
+    },
+    {
+      "uid": "gpt-5-6-luna-high-priority",
+      "label": "GPT-5.6 Luna High Thinking Fast",
+      "disabled": 0,
+      "harnesses": [
+        "gpt-5p6"
+      ],
+      "router": 0,
+      "family": [
+        {
+          "key": "Reasoning Effort",
+          "order": 3,
+          "name": "High"
+        },
+        {
+          "key": "Fast Mode",
+          "order": 1,
+          "name": ""
+        },
+        {
+          "key": "Prompt Cache Retention",
+          "order": 1,
+          "name": "24h"
+        }
+      ]
+    },
+    {
+      "uid": "swe-2-medium",
+      "label": "SWE-2 Medium",
+      "disabled": 0,
+      "harnesses": [
+        "swe-1p6",
+        "swe-1p5"
+      ],
+      "router": 0,
+      "family": [
+        {
+          "key": "Reasoning Effort",
+          "order": 0,
+          "name": "Medium"
+        }
+      ]
+    },
+    {
+      "uid": "swe-2-max",
+      "label": "SWE-2 Max",
+      "disabled": 0,
+      "harnesses": [
+        "swe-1p6",
+        "swe-1p5"
+      ],
+      "router": 0,
+      "family": [
+        {
+          "key": "Reasoning Effort",
+          "order": 2,
+          "name": "Max"
+        }
+      ]
+    },
+    {
+      "uid": "claude-fable-5-1-high",
+      "label": "Claude Fable 5.1 High",
+      "disabled": 0,
+      "harnesses": [
+        "strawberry-pancake"
+      ],
+      "router": 0,
+      "family": [
+        {
+          "key": "Effort",
+          "order": 2,
+          "name": "High"
+        },
+        {
+          "key": "Thinking",
+          "order": 1,
+          "name": ""
+        },
+        {
+          "key": "Fast Mode",
+          "order": 0,
+          "name": ""
+        },
+        {
+          "key": "1M Context",
+          "order": 0,
+          "name": ""
+        }
+      ]
+    }
+  ],
+  "fusions": [
+    {
+      "uid": "fusion-claude-fable-5-1-medium-sidekick-swe-2-medium",
+      "label": "Fusion (Claude Fable 5.1 Medium + SWE-2 Medium)",
+      "disabled": 0,
+      "harnesses": [
+        "fusion",
+        "strawberry-pancake"
+      ],
+      "router": 1,
+      "family": [
+        {
+          "key": "Lead",
+          "order": 1,
+          "name": "Claude Fable 5.1"
+        },
+        {
+          "key": "Effort",
+          "order": 2,
+          "name": "Medium"
+        },
+        {
+          "key": "Sidekick",
+          "order": 1,
+          "name": "SWE-2 Medium"
+        },
+        {
+          "key": "Fast Mode",
+          "order": 0,
+          "name": ""
+        },
+        {
+          "key": "Recommended Sidekick",
+          "order": 0,
+          "name": "SWE-2 Medium"
+        }
+      ]
+    },
+    {
+      "uid": "fusion-claude-fable-5-1-medium-sidekick-gpt-5-6-luna-high",
+      "label": "Fusion (Claude Fable 5.1 Medium + GPT-5.6 Luna High Thinking)",
+      "disabled": 0,
+      "harnesses": [
+        "fusion",
+        "strawberry-pancake"
+      ],
+      "router": 1,
+      "family": [
+        {
+          "key": "Lead",
+          "order": 1,
+          "name": "Claude Fable 5.1"
+        },
+        {
+          "key": "Effort",
+          "order": 2,
+          "name": "Medium"
+        },
+        {
+          "key": "Sidekick",
+          "order": 4,
+          "name": "GPT-5.6 Luna High"
+        },
+        {
+          "key": "Fast Mode",
+          "order": 0,
+          "name": ""
+        },
+        {
+          "key": "Recommended Sidekick",
+          "order": 0,
+          "name": "SWE-2 Medium"
+        }
+      ]
+    },
+    {
+      "uid": "fusion-claude-fable-5-1-medium-fast-sidekick-gpt-5-6-luna-high-priority",
+      "label": "Fusion (Claude Fable 5.1 Medium + GPT-5.6 Luna High Thinking Fast)",
+      "disabled": 0,
+      "harnesses": [
+        "fusion",
+        "strawberry-pancake"
+      ],
+      "router": 1,
+      "family": [
+        {
+          "key": "Lead",
+          "order": 1,
+          "name": "Claude Fable 5.1"
+        },
+        {
+          "key": "Effort",
+          "order": 2,
+          "name": "Medium"
+        },
+        {
+          "key": "Sidekick",
+          "order": 4,
+          "name": "GPT-5.6 Luna High"
+        },
+        {
+          "key": "Fast Mode",
+          "order": 1,
+          "name": ""
+        },
+        {
+          "key": "Recommended Sidekick",
+          "order": 0,
+          "name": "SWE-2 Medium"
+        }
+      ]
+    },
+    {
+      "uid": "fusion-claude-fable-5-1-medium-sidekick-glm-5-2",
+      "label": "Fusion (Claude Fable 5.1 Medium + GLM-5.2 High)",
+      "disabled": 0,
+      "harnesses": [
+        "fusion",
+        "strawberry-pancake"
+      ],
+      "router": 1,
+      "family": [
+        {
+          "key": "Lead",
+          "order": 1,
+          "name": "Claude Fable 5.1"
+        },
+        {
+          "key": "Effort",
+          "order": 2,
+          "name": "Medium"
+        },
+        {
+          "key": "Sidekick",
+          "order": 6,
+          "name": "GLM-5.2 High"
+        },
+        {
+          "key": "Fast Mode",
+          "order": 0,
+          "name": ""
+        },
+        {
+          "key": "Recommended Sidekick",
+          "order": 0,
+          "name": "SWE-2 Medium"
+        }
+      ]
+    },
+    {
+      "uid": "fusion-gpt-5-6-sol-high-sidekick-glm-5-2",
+      "label": "Fusion (GPT-5.6 Sol High Thinking + GLM-5.2 High)",
+      "disabled": 0,
+      "harnesses": [
+        "fusion",
+        "gpt-5p6"
+      ],
+      "router": 1,
+      "family": [
+        {
+          "key": "Lead",
+          "order": 3,
+          "name": "GPT-5.6 Sol"
+        },
+        {
+          "key": "Effort",
+          "order": 3,
+          "name": "High"
+        },
+        {
+          "key": "Sidekick",
+          "order": 6,
+          "name": "GLM-5.2 High"
+        },
+        {
+          "key": "Fast Mode",
+          "order": 0,
+          "name": ""
+        },
+        {
+          "key": "Recommended Sidekick",
+          "order": 0,
+          "name": "SWE-2 Medium"
+        }
+      ]
+    },
+    {
+      "uid": "fusion-claude-fable-5-1-medium-sidekick-gpt-5-6-sol-high",
+      "label": "Fusion (Claude Fable 5.1 Medium + GPT-5.6 Sol High Thinking)",
+      "disabled": 0,
+      "harnesses": [
+        "fusion",
+        "strawberry-pancake"
+      ],
+      "router": 1,
+      "family": [
+        {
+          "key": "Lead",
+          "order": 1,
+          "name": "Claude Fable 5.1"
+        },
+        {
+          "key": "Effort",
+          "order": 2,
+          "name": "Medium"
+        },
+        {
+          "key": "Sidekick",
+          "order": 5,
+          "name": "GPT-5.6 Sol High"
+        },
+        {
+          "key": "Fast Mode",
+          "order": 0,
+          "name": ""
+        },
+        {
+          "key": "Recommended Sidekick",
+          "order": 0,
+          "name": "SWE-2 Medium"
+        }
+      ]
+    },
+    {
+      "uid": "fusion-claude-fable-5-1-medium-fast-sidekick-gpt-5-6-sol-high-priority",
+      "label": "Fusion (Claude Fable 5.1 Medium + GPT-5.6 Sol High Thinking Fast)",
+      "disabled": 0,
+      "harnesses": [
+        "fusion",
+        "strawberry-pancake"
+      ],
+      "router": 1,
+      "family": [
+        {
+          "key": "Lead",
+          "order": 1,
+          "name": "Claude Fable 5.1"
+        },
+        {
+          "key": "Effort",
+          "order": 2,
+          "name": "Medium"
+        },
+        {
+          "key": "Sidekick",
+          "order": 5,
+          "name": "GPT-5.6 Sol High"
+        },
+        {
+          "key": "Fast Mode",
+          "order": 1,
+          "name": ""
+        },
+        {
+          "key": "Recommended Sidekick",
+          "order": 0,
+          "name": "SWE-2 Medium"
+        }
+      ]
+    },
+    {
+      "uid": "fusion-claude-fable-5-1-medium-sidekick-swe-2-high",
+      "label": "Fusion (Claude Fable 5.1 Medium + SWE-2 High)",
+      "disabled": 0,
+      "harnesses": [
+        "fusion",
+        "strawberry-pancake"
+      ],
+      "router": 1,
+      "family": [
+        {
+          "key": "Lead",
+          "order": 1,
+          "name": "Claude Fable 5.1"
+        },
+        {
+          "key": "Effort",
+          "order": 2,
+          "name": "Medium"
+        },
+        {
+          "key": "Sidekick",
+          "order": 2,
+          "name": "SWE-2 High"
+        },
+        {
+          "key": "Fast Mode",
+          "order": 0,
+          "name": ""
+        },
+        {
+          "key": "Recommended Sidekick",
+          "order": 0,
+          "name": "SWE-2 Medium"
+        }
+      ]
+    },
+    {
+      "uid": "fusion-sidekick-swe-2-medium",
+      "label": "Fusion Sidekick (SWE-2 Medium)",
+      "disabled": 0,
+      "harnesses": [
+        "swe-1p6",
+        "swe-1p5"
+      ],
+      "router": 1,
+      "family": []
+    },
+    {
+      "uid": "fusion-sidekick-gpt-5-6-luna-high-priority",
+      "label": "Fusion Sidekick (GPT-5.6 Luna High Thinking Fast)",
+      "disabled": 0,
+      "harnesses": [
+        "gpt-5p6"
+      ],
+      "router": 1,
+      "family": []
+    },
+    {
+      "uid": "fusion-claude-fable-5-1-high-sidekick-swe-2-medium",
+      "label": "Fusion (Claude Fable 5.1 High + SWE-2 Medium)",
+      "disabled": 0,
+      "harnesses": [
+        "fusion",
+        "strawberry-pancake"
+      ],
+      "router": 1,
+      "family": [
+        {
+          "key": "Lead",
+          "order": 1,
+          "name": "Claude Fable 5.1"
+        },
+        {
+          "key": "Effort",
+          "order": 3,
+          "name": "High"
+        },
+        {
+          "key": "Sidekick",
+          "order": 1,
+          "name": "SWE-2 Medium"
+        },
+        {
+          "key": "Fast Mode",
+          "order": 0,
+          "name": ""
+        },
+        {
+          "key": "Recommended Sidekick",
+          "order": 0,
+          "name": "SWE-2 Medium"
+        }
+      ]
+    }
+  ]
+}

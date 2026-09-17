@@ -15,7 +15,8 @@ const API = '/exa.api_server_pb.ApiServerService/';
 
 async function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'devin-backend-test-'));
-  const config = { providers: [{ id: 'test', name: 'Test', models: [{ id: 'model', label: 'Model' }] }], sidekicks: [{ nativeUid: 'swe-2-max', label: 'SWE-2 Max' }] };
+  const config = { providers: [{ id: 'test', name: 'Test', models: [{ id: 'model', label: 'Model' }] }], sidekicks: [{ nativeUid: 'swe-2-max', label: 'SWE-2 Max' }],
+    fusionPresets: ['swe-2-max', 'gpt-5-6-luna-high', 'swe-odd'].map(uid => ({ id: uid, name: uid, lead: { providerId: 'test', model: 'model', effort: null }, sidekick: { nativeUid: uid } })) };
   fs.writeFileSync(path.join(root, 'config.json'), JSON.stringify(config));
   const forwarded = [], chats = [], logs = [];
   const held = new Map();
@@ -164,7 +165,8 @@ test('an own plain model is listed, allowed and callable standalone against a th
   const allowed = augmentCatalog(wire.s(7, 'native-gpt'), { rpc: '/exa.seat_management_pb.SeatManagementService/GetCliTeamSettings', format: proto, catalog });
   const uids = wire.parseFields(allowed).filter(field => field.number === 7).map(field => field.value.toString());
   assert.equal(uids[0], 'native-gpt');
-  assert.ok(uids.includes(own) && uids.includes(Object.keys(catalog.fusions)[0]));
+  assert.ok(uids.includes(own));
+  assert.equal(Object.keys(catalog.fusions).length, 0);
   const lockedNative = Buffer.concat([wire.s(1, 'Fusion (Locked)'), wire.s(22, 'fusion-official-locked'), wire.v(4, 1)]);
   const listed = augmentCatalog(wire.m(1, lockedNative), { rpc: API + 'GetCliModelConfigs', format: proto, catalog });
   const entries = wire.parseFields(listed).filter(field => field.number === 1 && field.wire === 2).map(field => field.value);
@@ -184,7 +186,10 @@ test('an own plain model is listed, allowed and callable standalone against a th
 
 test('a catalog observation enables AssignModel with the native Sidekick exact harness intersection', async t => {
   const f = await fixture(t);
-  const observed = [{ uid: 'swe-2-max', label: 'SWE-2 Max', disabled: false, isModelRouter: false, harnessUids: ['swe-1p5', 'other-harness'] }];
+  const observed = [
+    { uid: 'swe-2-max', label: 'SWE-2 Max', disabled: false, isModelRouter: false, harnessUids: ['swe-1p5', 'other-harness'] },
+    { uid: 'fusion-lead-a-sidekick-swe-2-max', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 3, name: 'SWE-2 Max' } },
+  ];
   const fusion = Object.values(buildCatalog(f.config, observed).fusions).find(fusion => fusion.sidekickUid === 'swe-2-max');
   assert.ok(fusion, 'fixture config saves swe-2-max as a native Sidekick preference');
   const before = JSON.stringify({ modelRouterUid: fusion.uid, fusionLeadRouterUid: fusion.uid });
@@ -196,15 +201,42 @@ test('a catalog observation enables AssignModel with the native Sidekick exact h
   const resolved = await fetch(f.base + API + 'AssignModel', { method: 'POST', headers: { 'content-type': 'application/json' }, body: before });
   const data = JSON.parse(await resolved.text());
   assert.equal(data.assignment.modelUid, 'swe-2-max');
-  assert.deepEqual(data.assignment.harnessUids, ['swe-1p5'], 'exact observed intersection, not a blanket list');
+  assert.deepEqual(data.assignment.harnessUids, ['swe-1p5', 'other-harness']);
 });
 
 test('a saved native Sidekick preference alone never grants capability without observation', async t => {
   const f = await fixture(t);
-  const fusionUid = Object.values(buildCatalog(f.config, [{ uid: 'swe-2-max', disabled: false, isModelRouter: false, harnessUids: ['swe-1p6'] }]).fusions)
+  const fusionUid = Object.values(buildCatalog(f.config, [
+    { uid: 'swe-2-max', disabled: false, isModelRouter: false, harnessUids: ['swe-1p6'] },
+    { uid: 'fusion-lead-a-sidekick-swe-2-max', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 3, name: 'SWE-2 Max' } },
+  ]).fusions)
     .find(fusion => fusion.sidekickUid === 'swe-2-max').uid;
   const response = await fetch(f.base + API + 'AssignModel', { method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ modelRouterUid: fusionUid, fusionLeadRouterUid: fusionUid }) });
   assert.equal(await response.text(), 'official');
   assert.equal(f.forwarded.at(-1).target, 'https://server.codeium.com' + API + 'AssignModel');
+});
+
+test('an officially paired native Sidekick assigns its declared harness, an unpaired one stays closed', async t => {
+  const f = await fixture(t);
+  const observed = [
+    { uid: 'gpt-5-6-luna-high', label: 'GPT-5.6 Luna High Thinking', disabled: false, isModelRouter: false, harnessUids: ['gpt-5p6'] },
+    { uid: 'swe-odd', label: 'Odd', disabled: false, isModelRouter: false, harnessUids: ['odd-harness'] },
+    { uid: 'fusion-official-sidekick-gpt-5-6-luna-high', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'],
+      sidekickDimension: { order: 4, name: 'GPT-5.6 Luna High' } },
+    { uid: 'fusion-official-sidekick-swe-odd', label: 'F', disabled: true, isModelRouter: true, harnessUids: ['fusion'],
+      sidekickDimension: { order: 9, name: 'Odd' } },
+  ];
+  const built = buildCatalog(f.config, observed);
+  const luna = Object.values(built.fusions).find(fusion => fusion.sidekickUid === 'gpt-5-6-luna-high');
+  assert.ok(luna, 'enabled official pairing makes the unfamiliar-harness native eligible');
+  assert.equal(Object.values(built.fusions).find(fusion => fusion.sidekickUid === 'swe-odd'), undefined,
+    'a disabled pairing leaves an unfamiliar-harness native ineligible');
+  f.setNatives(observed);
+  await fetch(f.base + API + 'GetCliModelConfigs', { method: 'POST', body: 'native' });
+  const resolved = await fetch(f.base + API + 'AssignModel', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ modelRouterUid: luna.uid, fusionLeadRouterUid: luna.uid }) });
+  const data = JSON.parse(await resolved.text());
+  assert.equal(data.assignment.modelUid, 'gpt-5-6-luna-high');
+  assert.deepEqual(data.assignment.harnessUids, ['gpt-5p6'], 'the declared official harness is forwarded exactly');
 });

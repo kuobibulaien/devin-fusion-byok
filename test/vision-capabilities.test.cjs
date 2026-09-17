@@ -2,7 +2,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { modelSupportsImages } = require('../src/model-capabilities.cjs');
-const { buildCatalog, resolveAssignment } = require('../src/catalog.cjs');
+const { buildCatalog: buildSavedCatalog, resolveAssignment } = require('../src/catalog.cjs');
+const { withPresets } = require('./fixtures/presets.cjs');
+const buildCatalog = (config, natives = []) => buildSavedCatalog(withPresets(config, natives), natives);
 const { publicState } = require('../src/panel/model.cjs');
 const { parseChat } = require('../src/protocol/chat.cjs');
 const { buildRequestBody } = require('../src/protocol/responses.cjs');

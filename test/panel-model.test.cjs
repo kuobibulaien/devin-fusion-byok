@@ -5,7 +5,10 @@ const { createManager, publicState, cleanSidekicks, PanelInputError } = require(
 const { buildCatalog } = require('../src/catalog.cjs');
 
 const nativeSidekick = { nativeUid: 'swe-2-max', label: 'SWE-2 Max' };
-const OBSERVED_SWE = { uid: 'swe-2-max', label: 'SWE-2 Max', disabled: false, isModelRouter: false, harnessUids: ['swe-1p6', 'swe-1p5'] };
+const OBSERVED_SWE = [
+  { uid: 'swe-2-max', label: 'SWE-2 Max', disabled: false, isModelRouter: false, harnessUids: ['swe-1p6', 'swe-1p5'] },
+  { uid: 'fusion-lead-a-sidekick-swe-2-max', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 3, name: 'SWE-2 Max' } },
+];
 const model = (id, overrides = {}) => ({ id, label: id, enabled: true, efforts: [], contextWindow: 200000, maxOutputTokens: 32768, ...overrides });
 function fixture() {
   return {
@@ -48,12 +51,13 @@ function assertValidGraph(config, natives = []) {
 }
 
 test('public panel state exposes multiple providers and combinations without API credentials', async () => {
-  const f = memory({ nativeModels: () => [OBSERVED_SWE] });
+  const f = memory({ nativeModels: () => OBSERVED_SWE });
   const state = await f.manager.dispatch('ready');
   assert.equal(state.providers.length, 2);
   assert.equal(state.modelCount, 3);
-  assert.equal(state.fusionCount, 12);
-  assert.equal(state.fusionChoices.length, 12);
+  assert.equal(state.fusionCount, 0);
+  assert.equal(state.fusionChoices.length, 0);
+  assert.equal(state.presetCandidates.sidekick.length, 4);
   assert.equal(state.providers[0].keyConfigured, true);
   assert.equal(state.providers[0].baseUrl, 'https://cpa.invalid/v1');
   for (const secret of ['fixture-secret-cpa', 'fixture-secret-other', 'apiKey', 'Authorization']) assert.ok(!JSON.stringify(state).includes(secret));
@@ -155,13 +159,13 @@ test('disabling then re-enabling a provider preserves its keys and configured mo
 });
 
 test('any enabled third-party model may be a Sidekick together with an eligible observed native', async () => {
-  const f = memory({ nativeModels: () => [OBSERVED_SWE] });
+  const f = memory({ nativeModels: () => OBSERVED_SWE });
   await f.manager.dispatch('setSidekicks', { sidekicks: [{ providerId: 'other', model: 'other-lead' }, { nativeUid: 'swe-2-max', label: 'Ignored caller label' }] });
   const next = f.read();
   assert.deepEqual(next.sidekicks, [{ providerId: 'other', model: 'other-lead' }, nativeSidekick]);
-  const catalog = assertValidGraph(next, [OBSERVED_SWE]);
-  assert.equal(Object.keys(catalog.fusions).length, 12);
-  assert.deepEqual(new Set(Object.values(catalog.fusions).filter(f => !f.sidekickNative).map(f => catalog.routes[f.sidekickUid].model)),
+  const catalog = assertValidGraph(next, OBSERVED_SWE);
+  assert.equal(Object.keys(catalog.fusions).length, 0);
+  assert.deepEqual(new Set(catalog.presetCandidates.sidekick.filter(item => !item.ref.nativeUid).map(item => item.ref.model)),
     new Set(['lead', 'executor', 'other-lead']));
 });
 
@@ -276,7 +280,9 @@ test('a model batch is validated as a whole before any persistent write', async 
 });
 
 test('Fusion selection validates a currently available combination without writing provider configuration', async () => {
-  const f = memory(), uid = Object.keys(buildCatalog(f.read()).fusions)[0];
+  const input = fixture();
+  input.fusionPresets = [{ id: 'selected', name: 'Selected', lead: { providerId: 'cpa', model: 'lead' }, sidekick: { providerId: 'cpa', model: 'executor' } }];
+  const f = memory({ config: input }), uid = Object.keys(buildCatalog(f.read()).fusions)[0];
   const state = await f.manager.dispatch('selectFusion', { uid });
   assert.deepEqual(f.selections, [uid]);
   assert.equal(state.selectedFusionUid, uid);
@@ -290,7 +296,9 @@ test('Fusion selection validates a currently available combination without writi
 });
 
 test('a disabled or removed Lead cannot remain selectable through a stale Fusion UID', async () => {
-  const f = memory(), catalog = buildCatalog(f.read());
+  const input = fixture();
+  input.fusionPresets = [{ id: 'selected', name: 'Selected', lead: { providerId: 'cpa', model: 'lead' }, sidekick: { providerId: 'cpa', model: 'executor' } }];
+  const f = memory({ config: input }), catalog = buildCatalog(f.read());
   const uid = Object.values(catalog.fusions).find(fusion => catalog.routes[fusion.leadUid].model === 'lead').uid;
   await f.manager.dispatch('updateModels', { providerId: 'cpa', changes: [{ id: 'lead', enabled: false }] });
   await assert.rejects(f.manager.dispatch('selectFusion', { uid }), PanelInputError);
@@ -441,8 +449,9 @@ test('hiding a native model never touches provider data', async () => {
 
 test('observed native Sidekick eligibility drives state flags, combinations and setSidekicks', async () => {
   const observed = [
-    OBSERVED_SWE,
+    ...OBSERVED_SWE,
     { uid: 'swe-2-medium', label: 'Medium', disabled: false, isModelRouter: false, harnessUids: ['swe-1p5'] },
+    { uid: 'fusion-lead-a-sidekick-swe-2-medium', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'], sidekickDimension: { order: 1, name: 'SWE-2 Medium' } },
     { uid: 'swe-disabled', label: 'Off', disabled: true, isModelRouter: false, harnessUids: ['swe-1p6'] },
     { uid: 'swe-router', label: 'Router', disabled: false, isModelRouter: true, harnessUids: ['swe-1p6'] },
     { uid: 'swe-naked', label: 'Naked', disabled: false },
@@ -453,9 +462,11 @@ test('observed native Sidekick eligibility drives state flags, combinations and 
   assert.deepEqual(state.nativeModels.filter(entry => entry.eligible).map(entry => entry.uid).sort(), ['swe-2-max', 'swe-2-medium']);
   assert.equal(state.nativeModels.find(entry => entry.uid === 'swe-naked').eligible, false);
   const catalog = assertValidGraph(f.read(), observed);
-  assert.ok(Object.values(catalog.fusions).some(fusion => fusion.sidekickUid === 'swe-2-medium'));
+  assert.equal(Object.keys(catalog.fusions).length, 0);
+  const created = await f.manager.dispatch('saveFusionPreset', { name: 'Medium', lead: { providerId: 'cpa', model: 'lead' }, sidekick: { nativeUid: 'swe-2-medium' } });
+  assert.equal(created.fusionCount, 1);
   await f.manager.dispatch('setSidekicks', { sidekicks: [{ nativeUid: 'swe-2-medium' }] });
-  assert.deepEqual(f.read().sidekicks, [{ nativeUid: 'swe-2-medium', label: 'Medium' }]);
+  assert.deepEqual(f.read().sidekicks, [{ nativeUid: 'swe-2-medium', label: 'SWE-2 Medium' }]);
   for (const uid of ['swe-disabled', 'swe-router', 'swe-naked', 'swe-other-harness', 'swe-never-seen']) {
     await assert.rejects(f.manager.dispatch('setSidekicks', { sidekicks: [{ nativeUid: uid }] }), PanelInputError, uid);
   }
@@ -464,10 +475,10 @@ test('observed native Sidekick eligibility drives state flags, combinations and 
 test('a hidden observed native is excluded from Sidekick eligibility and selection', async () => {
   const input = fixture();
   input.hiddenNativeModelUids = ['swe-2-max'];
-  const f = memory({ config: input, nativeModels: () => [OBSERVED_SWE] });
+  const f = memory({ config: input, nativeModels: () => OBSERVED_SWE });
   const state = await f.manager.dispatch('ready');
   assert.equal(state.nativeModels.find(entry => entry.uid === 'swe-2-max').eligible, false);
-  const catalog = buildCatalog(f.read(), [OBSERVED_SWE]);
+  const catalog = buildCatalog(f.read(), OBSERVED_SWE);
   assert.equal(Object.values(catalog.fusions).filter(fusion => fusion.sidekickNative).length, 0);
   await assert.rejects(f.manager.dispatch('setSidekicks', { sidekicks: [{ nativeUid: 'swe-2-max' }] }), PanelInputError);
   await f.manager.dispatch('setNativeModelHidden', { uid: 'swe-2-max', hidden: false });
@@ -481,4 +492,23 @@ test('cleanSidekicks drops malformed entries without throwing', () => {
   cleanSidekicks(input);
   assert.ok(input.sidekicks.every(sidekick => sidekick && typeof sidekick === 'object'));
   assert.ok(!input.sidekicks.some(sidekick => sidekick.providerId === 'ghost'));
+});
+
+test('an officially paired native is offered and accepted; unpaired unfamiliar harnesses stay excluded', () => {
+  const observed = [
+    { uid: 'gpt-5-6-luna-high', label: 'GPT-5.6 Luna High Thinking', disabled: false, isModelRouter: false, harnessUids: ['gpt-5p6'] },
+    { uid: 'swe-odd', label: 'Odd', disabled: false, isModelRouter: false, harnessUids: ['odd-harness'] },
+    { uid: 'fusion-official-sidekick-gpt-5-6-luna-high', label: 'F', disabled: false, isModelRouter: true, harnessUids: ['fusion'],
+      sidekickDimension: { order: 4, name: 'GPT-5.6 Luna High' } },
+  ];
+  const f = memory({ nativeModels: () => observed });
+  const state = publicState(fixture(), '', observed);
+  assert.equal(state.nativeModels.find(entry => entry.uid === 'gpt-5-6-luna-high').eligible, true);
+  assert.equal(state.nativeModels.find(entry => entry.uid === 'swe-odd').eligible, false,
+    'an unfamiliar harness without an enabled official pairing stays ineligible');
+  assert.ok(state.sidekicks.some(item => item.nativeUid === 'gpt-5-6-luna-high'));
+  return f.manager.dispatch('setSidekicks', { sidekicks: [{ nativeUid: 'gpt-5-6-luna-high' }] }).then(async next => {
+    assert.ok(next.sidekicks.some(item => item.nativeUid === 'gpt-5-6-luna-high'));
+    await assert.rejects(f.manager.dispatch('setSidekicks', { sidekicks: [{ nativeUid: 'swe-odd' }] }), PanelInputError);
+  });
 });

@@ -4,12 +4,17 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { importLegacy, readConfig, writeConfig } = require('./config.cjs');
-const { buildCatalog } = require('./catalog.cjs');
+const { buildCatalog, normalizeFusionConfig } = require('./catalog.cjs');
 const { createManager } = require('./panel/model.cjs');
 const { installLsInjection } = require('./runtime/ls-injection.cjs');
 const { createLsBridge } = require('./runtime/bridge.cjs');
 const { runtimeIdentity, controlFile, PORT, MANAGEMENT_PROTOCOL } = require('./runtime/backend.cjs');
 const { readReceipt, remember, saveReceipt, valueAt, restoreObject, permitted } = require('./lifecycle/owned-settings.cjs');
+const { readNativeModels } = require('./runtime/native-models.cjs');
+const { installAutoContinue } = require('./runtime/auto-continue.cjs');
+let stopNativeSync;
+let stopAutoContinue;
+let resetAutoContinue;
 let connection;
 let runtimeWaitAbort;
 let activationGeneration = 0;
@@ -132,21 +137,79 @@ async function activate(context) {
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
   if (!fs.existsSync(configFile)) writeConfig(configFile, importLegacy());
   const config = () => readConfig(configFile);
-  const catalog = () => { const current = config(); return buildCatalog(current.enabled === false ? {} : current, [...nativeModels.values()]); };
+  let autoContinue;
+  try {
+    const native = vscode.extensions.getExtension('codeium.windsurf');
+    if (native?.extensionPath && native.packageJSON?.main) {
+      const nativeMainPath = path.resolve(native.extensionPath, native.packageJSON.main);
+      autoContinue = installAutoContinue({
+        nativeMainPath,
+        isEnabled: () => config().enabled !== false && (config().autoContinueOnProviderError === true || config().autoContinueUntilPlanComplete === true),
+        getOptions: () => ({
+          onProviderError: config().autoContinueOnProviderError === true,
+          untilPlanComplete: config().autoContinueUntilPlanComplete === true
+        }),
+        log
+      });
+    } else {
+      log('auto-continue-unavailable');
+    }
+  } catch {
+    log('auto-continue-unavailable');
+  }
+  stopAutoContinue = () => { autoContinue?.dispose(); autoContinue = undefined; };
+  resetAutoContinue = () => { autoContinue?.reset(); };
+  const catalog = () => { const current = config(); return buildCatalog(current.enabled === false ? { ...current, providers: [] } : current, [...nativeModels.values()]); };
   let management, manager;
-  const nativeModels = new Map();
+  const nativeModels = new Map(), localNativeModels = new Map();
+  let nativeCatalogStatus = 'loading', syncPending, syncAbort, syncTimer;
+  const refreshNativeModels = () => {
+    if (activationDisposed || config().enabled === false) return Promise.resolve();
+    if (syncPending) return syncPending;
+    const generation = activationGeneration;
+    const abort = new AbortController(); syncAbort = abort;
+    syncPending = (async () => {
+      let result;
+      try { result = await readNativeModels({ root, signal: abort.signal }); }
+      catch { result = { status: 'unavailable', models: [] }; }
+      if (abort.signal.aborted || generation !== activationGeneration || activationDisposed || config().enabled === false) return;
+      nativeCatalogStatus = result.status;
+      nativeModels.clear();
+      for (const entry of localNativeModels.values()) nativeModels.set(entry.uid, entry);
+      for (const entry of result.models) nativeModels.set(entry.uid, entry);
+      try { await management?.publish(); } catch {}
+    })().finally(() => { if (syncAbort === abort) { syncAbort = undefined; syncPending = undefined; } });
+    return syncPending;
+  };
+  const startNativeSync = () => {
+    stopNativeSync?.();
+    stopNativeSync = () => { clearInterval(syncTimer); syncAbort?.abort(); syncAbort = undefined; syncPending = undefined; };
+    syncTimer = setInterval(() => { void refreshNativeModels(); }, 3000); syncTimer.unref?.();
+    void refreshNativeModels();
+  };
   const observeNativeModels = entries => {
     if (!Array.isArray(entries)) return;
     let changed = false;
     for (const entry of entries) {
       if (!entry || typeof entry.uid !== 'string' || !entry.uid) continue;
+      const dimension = entry.sidekickDimension;
       const next = { uid: entry.uid, label: typeof entry.label === 'string' ? entry.label : '', disabled: entry.disabled === true,
         isModelRouter: entry.isModelRouter === true,
-        harnessUids: Array.isArray(entry.harnessUids) ? entry.harnessUids.filter(value => typeof value === 'string') : [] };
+        harnessUids: Array.isArray(entry.harnessUids) ? entry.harnessUids.filter(value => typeof value === 'string') : [],
+        ...(dimension && typeof dimension === 'object'
+          ? { sidekickDimension: { order: dimension.order, name: dimension.name, fastModeOrder: dimension.fastModeOrder } } : {}),
+        ...(Array.isArray(entry.fusionMetadata) ? { fusionMetadata: entry.fusionMetadata } : {}),
+        ...(entry.maxTokens ? { maxTokens: entry.maxTokens } : {}),
+        ...(entry.maxOutputTokens ? { maxOutputTokens: entry.maxOutputTokens } : {}),
+        ...(entry.supportsImages ? { supportsImages: true } : {}) };
       const previous = nativeModels.get(next.uid);
       if (!previous || previous.label !== next.label || previous.disabled !== next.disabled ||
-        previous.isModelRouter !== next.isModelRouter || JSON.stringify(previous.harnessUids) !== JSON.stringify(next.harnessUids)) {
-        nativeModels.set(next.uid, next); changed = true;
+        previous.isModelRouter !== next.isModelRouter || JSON.stringify(previous.harnessUids) !== JSON.stringify(next.harnessUids) ||
+        JSON.stringify(previous.sidekickDimension) !== JSON.stringify(next.sidekickDimension) ||
+        JSON.stringify(previous.fusionMetadata) !== JSON.stringify(next.fusionMetadata) ||
+        previous.maxTokens !== next.maxTokens || previous.maxOutputTokens !== next.maxOutputTokens ||
+        previous.supportsImages !== next.supportsImages) {
+        localNativeModels.set(next.uid, next); nativeModels.set(next.uid, next); changed = true;
       }
     }
     if (changed && !activationDisposed) try { void management?.publish()?.catch(() => {}); } catch {}
@@ -214,6 +277,7 @@ async function activate(context) {
       return;
     }
     connection = injected;
+    startNativeSync();
     log('activated', { nativeVersion: native.packageJSON.version, storage: root });
   }
   const run = fn => async () => { try { await fn(); } catch (error) {
@@ -234,19 +298,24 @@ async function activate(context) {
     remember(receipt, keys, valueAt({ 'devin.acp.agentPreferences': preferences }, keys), uid);
     saveReceipt(receipt);
     await settings.update('agentPreferences', { ...preferences, 'devin-cli': { ...(preferences['devin-cli'] || {}), model: uid } }, vscode.ConfigurationTarget.Global);
-    const current = config();
-    if (/^fusion-dfbyok-/.test(uid) && current.defaultFusionUid !== uid) { current.defaultFusionUid = uid; writeConfig(configFile, current); }
+    const current = normalizeFusionConfig(config(), [...nativeModels.values()]);
+    if (/^fusion-dfbyok-/.test(uid)) { current.defaultFusionUid = uid; writeConfig(configFile, current); }
     await management?.publish();
   };
   const rememberedFusion = () => {
-    const uid = config().defaultFusionUid;
-    return typeof uid === 'string' && Object.hasOwn(catalog().fusions, uid) ? uid : '';
+    const currentCatalog = catalog(), uid = currentCatalog.defaultFusionUid || config().defaultFusionUid;
+    return typeof uid === 'string' && Object.hasOwn(currentCatalog.fusions, uid) ? uid : '';
   };
   let reconcileQueue = Promise.resolve();
   const reconcilePreference = () => {
     const operation = reconcileQueue.then(async () => {
       if (reconcileHalted || config().enabled === false) return;
       const current = globalSetting(vscode.workspace.getConfiguration('devin.acp'), 'agentPreferences')['devin-cli']?.model;
+      const migration = catalog();
+      if (migration.migratedFrom === current && migration.defaultFusionUid) {
+        await saveFusionChoice(migration.defaultFusionUid);
+        return;
+      }
       if (typeof current === 'string' && /^fusion-dfbyok-/.test(current)) {
         if (!Object.hasOwn(catalog().fusions, current)) return;
         if (rememberedFusion() !== current) {
@@ -265,7 +334,8 @@ async function activate(context) {
   };
   context.subscriptions.push(vscode.commands.registerCommand('devinFusionByok.selectFusion', run(async () => {
     const choices = Object.entries(catalog().fusions).map(([uid, item]) => ({ label: item.label || uid, uid }));
-    const choice = await vscode.window.showQuickPick(choices, { title: '选择 Fusion 模型组合', matchOnDescription: true }); if (!choice) return;
+    if (!choices.length) { management?.open(); vscode.window.showInformationMessage('请先在控制面板新建并命名 Fusion 预设。'); return; }
+    const choice = await vscode.window.showQuickPick(choices, { title: '选择 Fusion 预设', matchOnDescription: true }); if (!choice) return;
     await saveFusionChoice(choice.uid);
     vscode.window.showInformationMessage('Fusion 模型已保存，请新建 Devin Local 会话。');
   })));
@@ -312,7 +382,8 @@ async function activate(context) {
     statusBar.command = 'devinFusionByok.openPanel'; statusBar.show(); context.subscriptions.push(statusBar);
   }
   manager = createManager({ read: config, write: current => writeConfig(configFile, current),
-    nativeModels: () => [...nativeModels.values()],
+    nativeModels: () => [...nativeModels.values()], refreshNativeModels, nativeCatalogStatus: () => nativeCatalogStatus,
+    autoContinueStatus: () => autoContinue ? (autoContinue.status().connections > 0 ? 'attached' : 'waiting') : 'unavailable',
     selectedFusion: () => {
       const current = globalSetting(vscode.workspace.getConfiguration('devin.acp'), 'agentPreferences')['devin-cli']?.model;
       if (typeof current === 'string' && current.startsWith('fusion-')) return current;
@@ -321,12 +392,23 @@ async function activate(context) {
     selectFusion: saveFusionChoice,
     afterChange: async type => {
       if (type === 'setEnabled' && config().enabled === false) await disable();
+      else if (type === 'setAutoContinue' || type === 'setAutoContinueUntilPlanComplete') resetAutoContinue?.();
       else if (config().enabled !== false) { await ensureEnabled(); await reconcileSelection(); }
     } });
   management = require('./panel/controller.cjs').createPanelController({ vscode, context, manager, safeError });
+  let lastAutoError = config().autoContinueOnProviderError === true;
+  let lastAutoPlan = config().autoContinueUntilPlanComplete === true;
   const onConfigChanged = () => {
     try {
-      if (config().enabled === false) void teardown().catch(() => log('disable-cleanup-error'));
+      const currentConfig = config();
+      const currentAutoError = currentConfig.autoContinueOnProviderError === true;
+      const currentAutoPlan = currentConfig.autoContinueUntilPlanComplete === true;
+      if (currentAutoError !== lastAutoError || currentAutoPlan !== lastAutoPlan) {
+        lastAutoError = currentAutoError;
+        lastAutoPlan = currentAutoPlan;
+        resetAutoContinue?.();
+      }
+      if (currentConfig.enabled === false) void teardown().catch(() => log('disable-cleanup-error'));
       else {
         void ensureEnabled().catch(error => { const safe = safeError(error); if (safe.code !== 'cancelled') log('error', { code: safe.code }); });
         void reconcilePreference();
@@ -343,8 +425,8 @@ async function activate(context) {
   });
   if (preferenceSubscription) context.subscriptions.push(preferenceSubscription);
   if (config().enabled !== false) await run(ensureEnabled)();
-  return { status: () => connection?.status };
+  return { status: () => connection?.status, autoContinue: () => autoContinue?.status() };
 }
-async function teardown() { activationGeneration++; runtimeWaitAbort?.abort(); reconcileHalted = true; if (connection) { const current = connection; connection = undefined; await current.dispose(); } }
-async function deactivate() { activationDisposed = true; await teardown(); }
+async function teardown() { resetAutoContinue?.(); stopNativeSync?.(); stopNativeSync = undefined; activationGeneration++; runtimeWaitAbort?.abort(); reconcileHalted = true; if (connection) { const current = connection; connection = undefined; await current.dispose(); } }
+async function deactivate() { activationDisposed = true; stopAutoContinue?.(); stopAutoContinue = undefined; await teardown(); }
 module.exports = { activate, deactivate, ensureBackend, safeError };

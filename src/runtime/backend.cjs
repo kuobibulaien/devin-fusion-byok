@@ -43,12 +43,19 @@ async function startBackend({ root, port = PORT, log = () => {} }) {
     if (!Array.isArray(entries)) return;
     for (const entry of entries) {
       if (!entry || typeof entry.uid !== 'string' || !entry.uid) continue;
+      const dimension = entry.sidekickDimension;
       observedNatives.set(entry.uid, { uid: entry.uid, label: typeof entry.label === 'string' ? entry.label : '',
         disabled: entry.disabled === true, isModelRouter: entry.isModelRouter === true,
-        harnessUids: Array.isArray(entry.harnessUids) ? entry.harnessUids.filter(value => typeof value === 'string') : [] });
+        harnessUids: Array.isArray(entry.harnessUids) ? entry.harnessUids.filter(value => typeof value === 'string') : [],
+        ...(dimension && typeof dimension === 'object'
+          ? { sidekickDimension: { order: dimension.order, name: dimension.name, fastModeOrder: dimension.fastModeOrder } } : {}),
+        ...(Array.isArray(entry.fusionMetadata) ? { fusionMetadata: entry.fusionMetadata } : {}),
+        ...(entry.maxTokens ? { maxTokens: entry.maxTokens } : {}),
+        ...(entry.maxOutputTokens ? { maxOutputTokens: entry.maxOutputTokens } : {}),
+        ...(entry.supportsImages ? { supportsImages: true } : {}) });
     }
   };
-  const getCatalog = () => { const current = config(); return buildCatalog(current.enabled === false ? {} : current, [...observedNatives.values()]); };
+  const getCatalog = () => { const current = config(); return buildCatalog(current.enabled === false ? { ...current, providers: [] } : current, [...observedNatives.values()]); };
   // Official Fusion uids observed as disabled in catalog responses. Entries
   // that later appear enabled are removed so Pro accounts keep native Fusion.
   // Persisted so a saved locked preference still redirects when a fresh
@@ -82,7 +89,7 @@ async function startBackend({ root, port = PORT, log = () => {} }) {
     try {
       body = await collect(request);
       const format = wire.decode(body, request.headers);
-      const current = config(), catalog = buildCatalog(current.enabled === false ? {} : current, [...observedNatives.values()]);
+      const current = config(), catalog = buildCatalog(current.enabled === false ? { ...current, providers: [] } : current, [...observedNatives.values()]);
       if (rpc.endsWith('/AssignModel')) {
         const resolved = resolveAssignment(format.data, format, catalog, lockedFusion);
         if (resolved) {
@@ -119,7 +126,16 @@ async function startBackend({ root, port = PORT, log = () => {} }) {
     if (request.headers.origin) { response.writeHead(403); response.end(); return; }
     if (request.method === 'GET' && request.url === '/health') {
       response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-      response.end(JSON.stringify({ ...identity, pid: process.pid, instanceId, managementProtocol: MANAGEMENT_PROTOCOL, activeRequests, draining })); return;
+      response.end(JSON.stringify({ ...identity, pid: process.pid, instanceId, managementProtocol: MANAGEMENT_PROTOCOL, nativeModelsProtocol: 1, activeRequests, draining })); return;
+    }
+    if (request.method === 'GET' && request.url === '/_runtime/native-models') {
+      const provided = typeof request.headers.authorization === 'string' ? request.headers.authorization : '';
+      const expected = 'Bearer ' + controlToken;
+      if (Buffer.byteLength(provided) !== Buffer.byteLength(expected) || !crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected))) {
+        response.writeHead(403); response.end(); return;
+      }
+      response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      response.end(JSON.stringify({ instanceId, models: [...observedNatives.values()] })); return;
     }
     if (request.method === 'POST' && request.url === '/_runtime/shutdown') {
       const provided = typeof request.headers.authorization === 'string' ? request.headers.authorization : '';

@@ -50,7 +50,7 @@ async function server(handler, t) {
   return { instance, url: `http://127.0.0.1:${instance.address().port}` };
 }
 
-async function bridge(t, upstreamHandler, apiFormat = 'openai-responses') {
+async function bridge(t, upstreamHandler, apiFormat = 'openai-responses', timeouts = {}) {
   const requests = [];
   const logs = [];
   const upstream = await server(async (req, res) => {
@@ -60,7 +60,7 @@ async function bridge(t, upstreamHandler, apiFormat = 'openai-responses') {
     await upstreamHandler(req, res);
   }, t);
   const proxy = await server((req, res) => {
-    serveChat({ request: parseChat(nativeRequest()), route: { model: 'test-model', uid: 'local-cpa-lead', effort: 'high' }, provider: { baseUrl: `${upstream.url}/v1`, apiKey: 'fake-provider-secret', apiFormat }, res, log: event => logs.push(event) });
+    serveChat({ request: parseChat(nativeRequest()), route: { model: 'test-model', uid: 'local-cpa-lead', effort: 'high' }, provider: { baseUrl: `${upstream.url}/v1`, apiKey: 'fake-provider-secret', apiFormat }, res, log: event => logs.push(event), timeouts });
   }, t);
   return { ...proxy, requests, logs, upstream };
 }
@@ -323,4 +323,94 @@ test('client cancellation aborts active upstream request', async t => {
   controller.abort();
   await Promise.race([closed, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('Upstream not aborted')), 2000); timer.unref(); })]);
   assert.equal(app.logs.some(log => log.event === 'chat-aborted'), true);
+});
+
+test('provider idle timeout outputs code 13 and target text, cancel does not retry', async t => {
+  let timer;
+  const app = await bridge(t, async (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(event({ type: 'response.output_text.delta', delta: 'First chunk' }));
+    timer = setTimeout(() => { if (!res.writableEnded) res.end(); }, 2000);
+    res.on('close', () => clearTimeout(timer));
+  }, 'openai-responses', { idleMs: 50, firstResponseMs: 500 });
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  assert.equal(result.messages.map(message => str(message, 3)).join(''), 'First chunkProvider response could not be completed.');
+  assert.equal(num(result.messages.at(-1), 5), 13);
+  assert.ok(app.logs.some(l => l.event === 'chat-error' && l.code === 'upstream_timeout'));
+});
+
+test('finish_reason content_filter maps to stopReason 11', async t => {
+  const app = await bridge(t, async (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end([
+      { choices: [{ index: 0, delta: { content: 'Blocked content' }, finish_reason: 'content_filter' }] }
+    ].map(event).join('') + 'data: [DONE]\n\n');
+  }, 'openai-chat-completions');
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  assert.equal(num(result.messages.at(-1), 5), 11);
+});
+
+test('raw heartbeat keeps stream alive past idle timeout until completion', async t => {
+  const app = await bridge(t, async (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(': heartbeat comment\r\n\r\n');
+    await new Promise(r => setTimeout(r, 40));
+    res.write(': heartbeat comment\r\n\r\n');
+    await new Promise(r => setTimeout(r, 40));
+    res.write(event({ type: 'response.output_text.delta', delta: 'Complete after heartbeats' }));
+    res.write(event({ type: 'response.completed', response: { status: 'completed', output: [] } }));
+    res.end();
+  }, 'openai-responses', { idleMs: 60 });
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  assert.equal(result.messages.map(message => str(message, 3)).join(''), 'Complete after heartbeats');
+  assert.equal(num(result.messages.at(-1), 5), 2);
+  assert.ok(app.logs.some(l => l.event === 'chat-complete' && l.requestId));
+});
+
+test('response.failed outputs generic target phrase and classified stream error', async t => {
+  const app = await bridge(t, async (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(event({ type: 'response.failed', error: { message: 'internal server error' } }));
+    res.end();
+  }, 'openai-responses');
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  assert.equal(result.messages.map(message => str(message, 3)).join(''), 'Provider response could not be completed.');
+  assert.equal(num(result.messages.at(-1), 5), 13);
+  assert.ok(app.logs.some(l => l.event === 'chat-error' && l.code === 'upstream_stream_error'));
+});
+
+test('invalid tool call JSON outputs invalid format message', async t => {
+  const app = await bridge(t, async (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(event({ type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', call_id: 'c1', name: 'tool' } }));
+    res.write(event({ type: 'response.function_call_arguments.done', output_index: 0, arguments: 'not valid json{' }));
+    res.write(event({ type: 'response.completed', response: { status: 'completed', output: [] } }));
+    res.end();
+  }, 'openai-responses');
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  assert.equal(result.messages.map(message => str(message, 3)).join(''), 'Provider response format is invalid.');
+  assert.equal(num(result.messages.at(-1), 5), 13);
+  assert.ok(app.logs.some(l => l.event === 'chat-error' && l.code === 'upstream_invalid_tool'));
+});
+
+test('firstResponse timeout triggers code 13 and upstream_timeout error', async t => {
+  const app = await bridge(t, async (req, res) => {
+    // Hang without sending headers
+    await new Promise(r => setTimeout(r, 200));
+  }, 'openai-responses', { firstResponseMs: 30, idleMs: 500 });
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  assert.equal(result.messages.map(message => str(message, 3)).join(''), 'Provider response could not be completed.');
+  assert.equal(num(result.messages.at(-1), 5), 13);
+  assert.ok(app.logs.some(l => l.event === 'chat-error' && l.code === 'upstream_timeout'));
+});
+
+test('malformed non-SSE content-type outputs invalid format message', async t => {
+  const app = await bridge(t, async (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('Not SSE content');
+  }, 'openai-responses');
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  assert.equal(result.messages.map(message => str(message, 3)).join(''), 'Provider response format is invalid.');
+  assert.equal(num(result.messages.at(-1), 5), 13);
+  assert.ok(app.logs.some(l => l.event === 'chat-error' && l.code === 'upstream_content_type'));
 });

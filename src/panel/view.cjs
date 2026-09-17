@@ -77,9 +77,10 @@ function renderPanel({ nonce, cspSource }) {
     .subtle-warning { color: var(--vscode-editorWarning-foreground, #cca700); margin-bottom: 10px; font-size: 12px; }
     .fusion-card { margin-top: 18px; }
     .fusion-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; }
+    .fusion-default-section { margin-bottom: 20px; }
     .section-hint { margin: 4px 0 10px; }
     .sidekick-list { max-height: 200px; overflow: auto; margin-top: 8px; border: 1px solid var(--vscode-panel-border, #454545); border-radius: 4px; }
-    .sidekick-row { display: flex; align-items: center; gap: 8px; padding: 6px 9px; cursor: pointer; }
+    .sidekick-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 9px; }
     .sidekick-row span { min-width: 0; overflow-wrap: anywhere; }
     .sidekick-row + .sidekick-row { border-top: 1px solid var(--vscode-panel-border, #454545); }
     .space-top { margin-top: 10px; }
@@ -161,6 +162,7 @@ function panelClient(modelSupportsImages) {
   let busy = false;
   let providerId = vscode.getState()?.providerId || '';
   let modelSearch = '';
+  let leadSearch = '';
   let sidekickSearch = '';
   let nativeSearch = '';
   let modelDraft = new Map();
@@ -396,61 +398,117 @@ function panelClient(modelSupportsImages) {
     for (const button of modelButtons) button.disabled = !dirty;
   }
 
-  function sidekickCandidates() {
-    const candidates = [];
-    for (const sidekick of state.sidekicks || []) {
-      if (sidekick.nativeUid) {
-        candidates.push({ value: sidekick, label: '原生 · ' + (sidekick.label || sidekick.nativeUid), modelId: sidekick.nativeUid });
-      } else {
-        const provider = (state.providers || []).find(item => item.id === sidekick.providerId);
-        const model = provider?.models.find(item => item.id === sidekick.model);
-        const label = model?.label || sidekick.model;
-        candidates.push({ value: sidekick, label: provider && !label.startsWith(provider.name + ' · ') ? provider.name + ' · ' + label : label, modelId: sidekick.model });
-      }
-    }
-    return candidates;
-  }
-
   function renderFusion() {
     const container = byId('fusion');
     container.replaceChildren();
     byId('fusion-count').textContent = (state.fusionCount || 0) + ' 个组合';
-    const sidekickSection = element('div', {}, element('h3', { text: 'Sidekick 模型' }),
-      element('p', { class: 'hint section-hint', text: '导入模型自动用于 Lead 和 Sidekick；符合执行条件的官方模型自动用于 Sidekick。' }));
-    const search = element('input', { type: 'search', placeholder: '搜索 Sidekick', 'aria-label': '搜索 Sidekick 模型',
-      oninput: event => { sidekickSearch = event.target.value; renderSidekickRows(); }
-    });
-    search.value = sidekickSearch;
-    sidekickSection.append(search, element('div', { id: 'sidekick-list', class: 'sidekick-list', 'aria-label': 'Sidekick 模型列表' }));
 
-    const defaultSection = element('div', {}, element('h3', { text: '默认 Fusion 组合' }),
-      element('p', { class: 'hint section-hint', text: '选择新会话使用的 Lead 和 Sidekick。也可以在 Devin 原生 Fusion 菜单中切换。' }));
-    const choices = state.fusionChoices || [];
-    const select = element('select', { 'aria-label': '默认 Fusion 组合', disabled: !choices.length });
-    select.append(element('option', { value: '', text: choices.length ? '选择一个 Fusion 组合' : '先启用 Lead 模型并保存 Sidekick' }));
-    for (const choice of choices) select.append(element('option', { value: choice.uid, text: choice.label }));
-    if (choices.some(choice => choice.uid === state.selectedFusionUid)) select.value = state.selectedFusionUid;
-    const selectButton = button('设为默认', () => {
-      if (select.value) run(() => request('selectFusion', { uid: select.value }), '正在设置默认组合…', '默认 Fusion 组合已保存，新建会话即可使用。');
-    }, false);
-    selectButton.disabled = !select.value || select.value === state.selectedFusionUid;
-    select.addEventListener('change', () => { selectButton.disabled = !select.value || select.value === state.selectedFusionUid; });
-    defaultSection.append(select, element('div', { class: 'space-top actions' }, selectButton));
+    const defaultSection = element('div', { class: 'fusion-default-section' }, element('h3', { text: '我的 Fusion 预设' }),
+      element('p', { class: 'hint section-hint', text: '只生成你保存的组合。每个预设以独立名称显示在原生模型列表最前面的“我的 Fusion”分组。下方角色列表只管理候选范围，不会自动配对。' }),
+      button('新建预设', () => presetDialog(), false));
+    if (state.migrationPending) defaultSection.append(element('p', { class: 'subtle-warning', text: '原默认组合暂时无法还原，请等待官方目录同步，或新建自己的预设。' }));
+    const presets = state.fusionPresets || [];
+    if (!presets.length) defaultSection.append(element('p', { class: 'hint space-top', text: '还没有保存预设。点击“新建预设”分别选择两个模型并命名。' }));
+    for (const preset of presets) {
+      const selectButton = button(preset.uid === state.selectedFusionUid ? '已选择' : '选择', () =>
+        run(() => request('selectFusion', { uid: preset.uid }), '正在选择预设…', '已记住该预设。也可以在原生模型列表直接切换。'), false);
+      selectButton.disabled = !preset.available || state.enabled === false || preset.uid === state.selectedFusionUid;
+      const describe = (role, label) => label || preset[role]?.nativeUid || [preset[role]?.providerId, preset[role]?.model, preset[role]?.effort].filter(Boolean).join(' · ');
+      defaultSection.append(element('div', { class: 'model-row' },
+        element('div', { class: 'model-text' }, element('strong', { text: preset.name }),
+          element('div', { class: 'hint', text: 'Lead: ' + describe('lead', preset.leadLabel) + ' / Sidekick: ' + describe('sidekick', preset.sidekickLabel) }),
+          !preset.available ? element('div', { class: 'subtle-warning', text: preset.reason }) : null),
+        element('div', { class: 'actions' }, selectButton, button('编辑', () => presetDialog(preset)),
+          button('删除', () => confirmDialog('删除预设？', '仅删除“' + preset.name + '”预设，不删除基础模型。', '删除', () => request('deleteFusionPreset', { id: preset.id }), true)))));
+    }
+    const autoContinueSection = element('div', { class: 'space-top' },
+      element('label', { class: 'model-label' },
+        element('input', {
+          type: 'checkbox',
+          checked: state.autoContinueOnProviderError === true,
+          disabled: state.enabled === false,
+          onchange: event => {
+            const checked = event.target.checked;
+            run(() => request('setAutoContinue', { enabled: checked }), checked ? '正在开启自动继续…' : '正在关闭自动继续…')
+              .then(ok => { if (!ok) event.target.checked = !checked; });
+          }
+        }),
+        element('div', { class: 'model-text' },
+          element('span', { class: 'model-title', text: '遇到服务商错误时自动继续回复' }),
+          element('span', { class: 'hint', text: '当模型回复以“Provider response could not be completed”结尾或返回临时网络错误时自动发送 continue，重复直到正常响应。' }),
+          element('span', { class: 'subtle-warning', text: '注意：若服务商按 Token 计费，频繁重试可能产生额外费用。' }))),
+      element('label', { class: 'model-label space-top' },
+        element('input', {
+          type: 'checkbox',
+          checked: state.autoContinueUntilPlanComplete === true,
+          disabled: state.enabled === false,
+          onchange: event => {
+            const checked = event.target.checked;
+            run(() => request('setAutoContinueUntilPlanComplete', { enabled: checked }), checked ? '正在开启待办自动继续…' : '正在关闭待办自动继续…')
+              .then(ok => { if (!ok) event.target.checked = !checked; });
+          }
+        }),
+        element('div', { class: 'model-text' },
+          element('span', { class: 'model-title', text: '有未完成待办时自动继续' }),
+          element('span', { class: 'hint', text: '当检测到会话中有未完成的结构化待办列表（Plan）时自动发送 continue 推动执行，直到全部待办完成。无待办或非结构化计划时不会自动循环，随时可通过停止或权限拦截打断。' }))));
+    autoContinueSection.append(element('p', { class: 'hint', text: state.autoContinueStatus === 'attached'
+      ? '自动继续已接入本地会话连接；开关只影响之后发生的失败与待办。'
+      : state.autoContinueStatus === 'waiting' ? '等待本地会话连接；请重新加载窗口并新建会话。'
+      : '自动继续接口当前不可用，请查看插件输出日志。' }));
+    defaultSection.append(autoContinueSection);
     if (state.enabled === false) defaultSection.append(element('p', { class: 'subtle-warning space-top', text: '插件当前已停用。启用后，导入的模型和 Fusion 组合才会出现在新会话中。' }));
-    container.append(element('div', { class: 'fusion-grid' }, sidekickSection, defaultSection));
-    renderSidekickRows();
+
+    const leadSection = element('div', {}, element('h3', { text: 'Lead 模型' }),
+      element('p', { class: 'hint section-hint', text: '选择可作为主模型的导入模型与官方模型。移除仅排除该角色，不删除基础模型。' }));
+    const leadInput = element('input', { type: 'search', placeholder: '搜索 Lead 模型', 'aria-label': '搜索 Lead 模型',
+      oninput: event => { leadSearch = event.target.value; renderRoleRows('lead'); }
+    });
+    leadInput.value = leadSearch;
+    leadSection.append(leadInput, element('div', { id: 'lead-role-list', class: 'sidekick-list', 'aria-label': 'Lead 模型列表' }));
+
+    const sidekickSection = element('div', {}, element('h3', { text: 'Sidekick 模型' }),
+      element('p', { class: 'hint section-hint', text: '选择可作为辅助模型的导入模型与官方模型。移除仅排除该角色，不删除基础模型。' }));
+    const sidekickInput = element('input', { type: 'search', placeholder: '搜索 Sidekick 模型', 'aria-label': '搜索 Sidekick 模型',
+      oninput: event => { sidekickSearch = event.target.value; renderRoleRows('sidekick'); }
+    });
+    sidekickInput.value = sidekickSearch;
+    sidekickSection.append(sidekickInput, element('div', { id: 'sidekick-role-list', class: 'sidekick-list', 'aria-label': 'Sidekick 模型列表' }));
+
+    container.append(defaultSection, element('div', { class: 'fusion-grid' }, leadSection, sidekickSection));
+    renderRoleRows('lead');
+    renderRoleRows('sidekick');
   }
 
-  function renderSidekickRows() {
-    const container = byId('sidekick-list');
-    const query = sidekickSearch.trim().toLocaleLowerCase();
-    const candidates = sidekickCandidates().filter(candidate => !query || (candidate.label + ' ' + (candidate.modelId || '')).toLocaleLowerCase().includes(query));
+  function renderRoleRows(role) {
+    const containerId = role === 'lead' ? 'lead-role-list' : 'sidekick-role-list';
+    const container = byId(containerId);
+    if (!container) return;
+    const query = (role === 'lead' ? leadSearch : sidekickSearch).trim().toLocaleLowerCase();
+    const list = state.roleLists?.[role] || [];
+    const rows = list.filter(item => !query || item.label.toLocaleLowerCase().includes(query));
     container.replaceChildren();
-    for (const candidate of candidates) {
-      container.append(element('div', { class: 'sidekick-row' }, element('span', { text: candidate.label }),
-        element('span', { class: 'hint', text: '自动可用' })));
+    for (const item of rows) {
+      let action;
+      if (item.selected) {
+        action = element('button', {
+          type: 'button', class: 'quiet', text: '移除', 'aria-label': `从 ${role} 移除 ` + item.label,
+          onclick: () => run(() => request('setRoleModel', { role, model: item.ref, enabled: false }), '正在更新角色模型…')
+        });
+      } else if (item.available) {
+        action = element('button', {
+          type: 'button', class: 'quiet', text: '添加', 'aria-label': `添加到 ${role} ` + item.label,
+          onclick: () => run(() => request('setRoleModel', { role, model: item.ref, enabled: true }), '正在更新角色模型…')
+        });
+      } else {
+        action = element('span', { class: 'hint', text: item.reason || '不可用' });
+      }
+      container.append(element('div', { class: 'sidekick-row' },
+        element('span', { text: (item.native ? '原生 · ' : '') + item.label }),
+        element('div', { class: 'actions' }, action)));
     }
-    if (!candidates.length) container.append(element('div', { class: 'empty', text: '等待 Devin 上报官方模型，或先导入第三方模型。' }));
+    if (!rows.length) {
+      container.append(element('div', { class: 'empty', text: list.length ? '没有匹配的模型。' : '等待 Devin 上报官方模型，或先导入第三方模型。' }));
+    }
   }
 
   function renderNative() {
@@ -462,7 +520,8 @@ function panelClient(modelSupportsImages) {
       oninput: event => { nativeSearch = event.target.value; renderNativeRows(); }
     });
     search.value = nativeSearch;
-    container.append(element('div', { class: 'toolbar' }, search));
+    container.append(element('div', { class: 'toolbar' }, search, element('button', { type: 'button', text: '刷新官方模型',
+      onclick: () => run(() => request('refreshNativeModels'), '正在同步官方模型…') })));
     container.append(element('p', { class: 'hint section-hint', text: '移除只在本机模型列表中隐藏，不影响官方账号和权限；加回后等 Devin 刷新列表即可恢复。标记“可作 Sidekick”的模型会自动加入 Fusion 组合。' }));
     container.append(element('div', { id: 'native-list', class: 'model-list', 'aria-label': '官方模型列表' }));
     renderNativeRows();
@@ -476,7 +535,7 @@ function panelClient(modelSupportsImages) {
     const query = nativeSearch.trim().toLocaleLowerCase();
     const models = all.filter(model => !query || (model.uid + ' ' + (model.label || '')).toLocaleLowerCase().includes(query));
     if (!models.length) {
-      container.append(element('div', { class: 'empty', text: all.length ? '没有匹配的模型。' : '等待 Devin 刷新官方模型列表' }));
+      container.append(element('div', { class: 'empty', text: all.length ? '没有匹配的模型。' : ({ loading: '正在同步后台官方模型列表…', unsupported: '当前后台版本暂不支持目录同步，等待后台更新后重试。', unavailable: '无法连接已验证的本地后台，请点击刷新重试。', empty: '后台尚未收到官方目录，请打开 Devin 模型选择器后刷新。' }[state.nativeCatalogStatus] || '尚未收到官方模型列表，请点击刷新重试。') }));
       return;
     }
     for (const model of models) {
@@ -591,6 +650,27 @@ function panelClient(modelSupportsImages) {
     finishDialog(dialog, form, '导入所选模型', () => request('importModels', { providerId, token: candidates.token, ids: [...selected] }));
     submit = form.querySelector('button[type="submit"]');
     renderRows();
+  }
+
+  function presetDialog(preset) {
+    const { dialog, form } = openDialog(preset ? '编辑 Fusion 预设' : '新建 Fusion 预设');
+    const name = input(preset?.name || '', { required: true, maxlength: 80, placeholder: '例如：日常开发、深入排查' });
+    form.append(element('label', { class: 'field' }, element('span', { class: 'field-title', text: '预设名称' }), name));
+    const selections = {};
+    for (const role of ['lead', 'sidekick']) {
+      const candidates = [...(state.presetCandidates?.[role] || [])];
+      const key = ref => JSON.stringify([ref?.nativeUid || '', ref?.providerId || '', ref?.model || '', ref?.effort ?? null]);
+      if (preset?.[role] && !candidates.some(item => key(item.ref) === key(preset[role]))) candidates.push({ ref: preset[role], label: '当前不可用：' + (preset[role].nativeUid || preset[role].model) });
+      const select = element('select', { required: true, 'aria-label': role === 'lead' ? 'Lead 模型与档位' : 'Sidekick 模型与档位' });
+      select.append(element('option', { value: '', text: '请选择模型与档位' }));
+      candidates.forEach((item, index) => select.append(element('option', { value: String(index), text: item.label })));
+      if (preset?.[role]) select.value = String(candidates.findIndex(item => key(item.ref) === key(preset[role])));
+      form.append(element('label', { class: 'field' }, element('span', { class: 'field-title', text: role === 'lead' ? 'Lead 模型与档位' : 'Sidekick 模型与档位' }), select));
+      selections[role] = () => select.value === '' ? null : candidates[Number(select.value)]?.ref;
+    }
+    finishDialog(dialog, form, '保存预设', () => request('saveFusionPreset', {
+      ...(preset ? { id: preset.id } : {}), name: name.value, lead: selections.lead(), sidekick: selections.sidekick(),
+    }));
   }
 
   function providerDialog(provider) {
