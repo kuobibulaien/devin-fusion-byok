@@ -395,7 +395,8 @@ async function activate(context) {
       else if (type === 'setAutoContinue' || type === 'setAutoContinueUntilPlanComplete') resetAutoContinue?.();
       else if (config().enabled !== false) { await ensureEnabled(); await reconcileSelection(); }
     } });
-  management = require('./panel/controller.cjs').createPanelController({ vscode, context, manager, safeError });
+  management = require('./panel/controller.cjs').createPanelController({ vscode, context, manager, safeError,
+    readMonitor: () => require('./runtime/monitor-client.cjs').readMonitor({ root }) });
   let lastAutoError = config().autoContinueOnProviderError === true;
   let lastAutoPlan = config().autoContinueUntilPlanComplete === true;
   const onConfigChanged = () => {

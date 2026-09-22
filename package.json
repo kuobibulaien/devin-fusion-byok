@@ -2,7 +2,7 @@
   "name": "devin-fusion-byok",
   "displayName": "Devin Fusion BYOK",
   "description": "Import OpenAI-compatible models into Devin Local and native Fusion through runtime bridges.",
-  "version": "0.3.18",
+  "version": "0.3.22",
   "publisher": "local",
   "license": "MIT",
   "engines": {

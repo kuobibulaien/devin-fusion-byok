@@ -1635,3 +1635,136 @@ test('legacy ext/method _session/elicitation and finishedOutcome cancel pending 
   const res = await p;
   assert.equal(res.stopReason, 'end_turn');
 });
+
+function planProgressFixture(t, protocolVersion) {
+  const f = fixture();
+  const scheduler = fakeScheduler();
+  const handle = f.install({
+    isEnabled: () => true,
+    getOptions: () => ({ onProviderError: true, untilPlanComplete: true }),
+    scheduler
+  });
+  t.after(() => handle.dispose());
+  const calls = [], resolvers = [];
+  const connector = {
+    agentId: 'devin-cli', bundled: true, location: { kind: 'local' }, protocolVersion,
+    sendRequest(request) {
+      calls.push(request);
+      return protocolVersion === 2 ? Promise.resolve({ acknowledgment: true }) :
+        new Promise(resolve => resolvers.push(resolve));
+    },
+    forwardClientRequest() {}
+  };
+  f.api.registerConnection(connector);
+  const sessionId = 'plan-progress';
+  const update = value => connector.forwardClientRequest({
+    method: 'session/update', params: { sessionId, update: value }
+  });
+  return {
+    ...f, scheduler, handle, calls,
+    prompt: () => connector.sendRequest({
+      method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'task' }] }
+    }),
+    plan(entries, planId) {
+      update(planId ? { sessionUpdate: 'plan_update', plan: { type: 'items', planId, entries } } :
+        { sessionUpdate: 'plan', entries });
+    },
+    async finish(error = false) {
+      const text = error ? 'Provider response could not be completed.' : 'Task finished; waiting for user confirmation.';
+      update(protocolVersion === 2 ? {
+        sessionUpdate: 'agent_message', messageId: `response-${calls.length}`, content: [{ type: 'text', text }]
+      } : { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } });
+      if (protocolVersion === 2) update({ sessionUpdate: 'state_update', state: 'idle', stopReason: 'end_turn' });
+      else resolvers.shift()({ stopReason: 'end_turn' });
+      await new Promise(resolve => setImmediate(resolve));
+    }
+  };
+}
+
+for (const protocolVersion of [1, 2]) {
+  for (const variant of ['no-update', 'identical', 'reordered', 'new-plan-id', 'error-recovery']) {
+    test(`v${protocolVersion} stops stale plan continuation after ${variant}`, { timeout: 1000 }, async t => {
+      const f = planProgressFixture(t, protocolVersion);
+      const pending = [
+        { content: 'Reset verified', status: 'completed' },
+        { content: 'Blocked; needs user confirmation', status: 'in_progress' }
+      ];
+      const p = f.prompt();
+      f.plan(pending, variant === 'new-plan-id' ? 'old' : undefined);
+      await f.finish(variant === 'error-recovery');
+      assert.equal(f.scheduler.pendingCount(), 1);
+      f.scheduler.advance(2000);
+      assert.equal(f.calls.length, 2);
+      if (variant === 'identical') f.plan(pending);
+      if (variant === 'reordered') f.plan([...pending].reverse());
+      if (variant === 'new-plan-id') f.plan(pending, 'new');
+      await f.finish();
+      assert.equal(f.scheduler.pendingCount(), 0);
+      assert.equal(f.handle.status().activeSessions, 0);
+      const result = await p;
+      if (protocolVersion === 1) assert.equal(result.stopReason, 'end_turn');
+      const stopped = f.logs.filter(log => log.event === 'auto-continue-stopped');
+      assert.equal(stopped.length, 1);
+      assert.equal(stopped[0].data.reason, 'plan-no-progress');
+      assert.equal(stopped[0].data.attempts, 1);
+      assert.deepEqual(Object.keys(stopped[0].data).sort(), ['attempts', 'reason']);
+      assert.equal(JSON.stringify(f.logs).includes('Blocked'), false);
+      f.scheduler.advance(60000);
+      assert.equal(f.calls.length, 2);
+
+      const next = f.prompt();
+      f.plan(pending);
+      await f.finish();
+      assert.equal(f.scheduler.pendingCount(), 1);
+      f.scheduler.advance(2000);
+      assert.equal(f.calls.length, 4);
+      f.plan(pending.map(entry => ({ ...entry, status: 'completed' })));
+      await f.finish();
+      await next;
+      assert.equal(f.scheduler.pendingCount(), 0);
+      assert.equal(f.handle.status().activeSessions, 0);
+    });
+  }
+
+  test(`v${protocolVersion} permits semantic progress with unchanged pending count`, { timeout: 1000 }, async t => {
+    const f = planProgressFixture(t, protocolVersion);
+    const p = f.prompt();
+    f.plan([{ content: 'Work', status: 'pending' }]);
+    await f.finish();
+    f.scheduler.advance(2000);
+    f.plan([{ content: 'Work', status: 'in_progress' }]);
+    await f.finish();
+    assert.equal(f.scheduler.pendingCount(), 1);
+    f.scheduler.advance(4000);
+    f.plan([{ content: 'Verify work', status: 'in_progress' }]);
+    await f.finish();
+    assert.equal(f.scheduler.pendingCount(), 1);
+    f.scheduler.advance(8000);
+    f.plan([{ content: 'Verify work', status: 'completed' }]);
+    await f.finish();
+    await p;
+    assert.equal(f.calls.length, 4);
+    assert.equal(f.scheduler.pendingCount(), 0);
+    assert.equal(f.handle.status().activeSessions, 0);
+    assert.equal(f.logs.some(log => log.event === 'auto-continue-stopped'), false);
+  });
+
+  test(`v${protocolVersion} preserves error retries before stopping unchanged recovered plan`, { timeout: 1000 }, async t => {
+    const f = planProgressFixture(t, protocolVersion);
+    const p = f.prompt();
+    f.plan([{ content: 'Waiting for confirmation', status: 'in_progress' }]);
+    await f.finish(true);
+    f.scheduler.advance(2000);
+    await f.finish(true);
+    assert.equal(f.scheduler.pendingCount(), 1);
+    assert.equal(f.logs.some(log => log.event === 'auto-continue-stopped'), false);
+    f.scheduler.advance(4000);
+    await f.finish();
+    assert.equal(f.scheduler.pendingCount(), 0);
+    await p;
+    assert.equal(f.calls.length, 3);
+    assert.equal(f.handle.status().activeSessions, 0);
+    assert.equal(f.logs.filter(log => log.event === 'auto-continue-stopped').length, 1);
+    assert.equal(f.logs.filter(log => log.event === 'auto-continue-scheduled').every(log => log.data.reason === 'error'), true);
+  });
+}

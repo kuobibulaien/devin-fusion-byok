@@ -1,7 +1,7 @@
 'use strict';
 
 const { createRequire } = require('node:module');
-const { randomUUID } = require('node:crypto');
+const { createHash, randomUUID } = require('node:crypto');
 
 const INSTANCE = Symbol.for('devin-fusion-byok.auto-continue.v1');
 const ATTACHED = Symbol.for('devin-fusion-byok.auto-continue.attached');
@@ -130,6 +130,17 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
         if (!plan || plan.invalid) continue;
         if (plan.pendingCount > 0) return true;
       }
+      return false;
+    }
+
+    function planSnapshot(turn) {
+      return JSON.stringify([...new Set([...turn.plans.values()]
+        .filter(plan => !plan.invalid).map(plan => plan.signature))].sort());
+    }
+
+    function hasPlanProgress(turn) {
+      if (turn.autoPlanSnapshot === null || turn.autoPlanSnapshot !== planSnapshot(turn)) return true;
+      report('auto-continue-stopped', { reason: 'plan-no-progress', attempts: turn.attempts });
       return false;
     }
 
@@ -274,7 +285,7 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
           if (shouldRetryError) {
             turn.lastResult = { value: res, isReject: false };
             scheduleAuto(sessionId, turn, 'error');
-          } else if (shouldRetryPlan) {
+          } else if (shouldRetryPlan && hasPlanProgress(turn)) {
             turn.lastResult = { value: res, isReject: false };
             scheduleAuto(sessionId, turn, 'plan');
           } else {
@@ -335,7 +346,9 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
         }
         if (status === 'pending' || status === 'in_progress') pending++;
       }
-      return pending;
+      const signature = createHash('sha256').update(JSON.stringify(entries
+        .map(e => JSON.stringify([e.content, e.status])).sort())).digest('hex');
+      return { invalid: false, pendingCount: pending, signature };
     }
 
     function processPlanUpdate(turn, update, sessionId) {
@@ -343,12 +356,8 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
       if (!turn.plans) turn.plans = new Map();
 
       if (update.sessionUpdate === 'plan') {
-        const pending = validatePlanEntries(update.entries);
-        if (pending === null) {
-          turn.plans.set('__default__', { invalid: true, pendingCount: 0 });
-        } else {
-          turn.plans.set('__default__', { invalid: false, pendingCount: pending });
-        }
+        const state = validatePlanEntries(update.entries);
+        turn.plans.set('__default__', state || { invalid: true, pendingCount: 0 });
       } else if (update.sessionUpdate === 'plan_update') {
         const plan = update.plan;
         const planId = plan?.planId;
@@ -360,12 +369,8 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
           } else if (plan?.type !== 'items') {
             turn.plans.set(planId, { invalid: true, pendingCount: 0 });
           } else {
-            const pending = validatePlanEntries(plan.entries);
-            if (pending === null) {
-              turn.plans.set(planId, { invalid: true, pendingCount: 0 });
-            } else {
-              turn.plans.set(planId, { invalid: false, pendingCount: pending });
-            }
+            const state = validatePlanEntries(plan.entries);
+            turn.plans.set(planId, state || { invalid: true, pendingCount: 0 });
           }
         }
       } else if (update.sessionUpdate === 'plan_removed') {
@@ -461,7 +466,7 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
 
             if (shouldRetryError) {
               scheduleAuto(sessionId, turn, 'error');
-            } else if (shouldRetryPlan) {
+            } else if (shouldRetryPlan && hasPlanProgress(turn)) {
               scheduleAuto(sessionId, turn, 'plan');
             } else {
               entry.sessions.delete(sessionId);
@@ -587,6 +592,7 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
               lastResult: null,
               deferred: null,
               plans: new Map(),
+              autoPlanSnapshot: null,
               scheduledReason: null
             };
             entry.sessions.set(sessionId, manualTurn);
@@ -598,6 +604,7 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
           if (currentTurn) {
             currentTurn.generation = ++entry.turnGeneration;
             currentTurn.attempts = autoAttempts.get(request) || (currentTurn.attempts + 1);
+            currentTurn.autoPlanSnapshot = planSnapshot(currentTurn);
             currentTurn.tail = '';
             currentTurn.messageId = null;
             currentTurn.consumed = false;

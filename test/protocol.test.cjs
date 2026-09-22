@@ -50,7 +50,7 @@ async function server(handler, t) {
   return { instance, url: `http://127.0.0.1:${instance.address().port}` };
 }
 
-async function bridge(t, upstreamHandler, apiFormat = 'openai-responses', timeouts = {}) {
+async function bridge(t, upstreamHandler, apiFormat = 'openai-responses', timeouts = {}, onMetrics = () => {}) {
   const requests = [];
   const logs = [];
   const upstream = await server(async (req, res) => {
@@ -60,12 +60,30 @@ async function bridge(t, upstreamHandler, apiFormat = 'openai-responses', timeou
     await upstreamHandler(req, res);
   }, t);
   const proxy = await server((req, res) => {
-    serveChat({ request: parseChat(nativeRequest()), route: { model: 'test-model', uid: 'local-cpa-lead', effort: 'high' }, provider: { baseUrl: `${upstream.url}/v1`, apiKey: 'fake-provider-secret', apiFormat }, res, log: event => logs.push(event), timeouts });
+    serveChat({ request: parseChat(nativeRequest()), route: { model: 'test-model', uid: 'local-cpa-lead', effort: 'high' }, provider: { baseUrl: `${upstream.url}/v1`, apiKey: 'fake-provider-secret', apiFormat }, res, log: event => logs.push(event), timeouts, onMetrics });
   }, t);
   return { ...proxy, requests, logs, upstream };
 }
 
 function event(value) { return `data: ${JSON.stringify(value)}\r\n\r\n`; }
+
+test('monitor captures usage after Chat finish_reason without duplicate output', async t => {
+  const metrics = [];
+  const proxy = await bridge(t, async (_, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(event({ choices: [{ delta: { content: 'hello' }, finish_reason: 'stop' }] }));
+    res.write(event({ choices: [], usage: { prompt_tokens: 12, completion_tokens: 3, prompt_tokens_details: { cached_tokens: 0 } } }));
+    res.end('data: [DONE]\n\n');
+  }, 'openai', {}, value => metrics.push(value));
+  const response = await fetch(proxy.url);
+  const output = unpack(Buffer.from(await response.arrayBuffer()));
+  assert.equal(output.messages.map(m => str(m, 3)).join(''), 'hello');
+  assert.equal(metrics.length, 1);
+  assert.equal(metrics[0].inputTokens, 12); assert.equal(metrics[0].outputTokens, 3);
+  assert.equal(metrics[0].cachedTokens, 0); assert.equal(metrics[0].usageComplete, true);
+  assert.equal(metrics[0].status, 'success');
+  assert.deepEqual(proxy.requests[0].body.stream_options, { include_usage: true });
+});
 
 test('protobuf retains unknown raw fields and uint64 without rounding', () => {
   const input = Buffer.concat([s(3, '模型'), v(911, 18446744073709551615n), m(300, Buffer.from([1, 2, 3]))]);

@@ -14,7 +14,7 @@ const VERSION = require('../../package.json').version;
 const API_PREFIX = '/exa.api_server_pb.ApiServerService/';
 const SERVICE = 'devin-fusion-byok';
 const MANAGEMENT_PROTOCOL = 1;
-const SOURCE_FILES = ['../../package.json', 'backend.cjs', 'bridge.cjs', '../config.cjs', '../catalog.cjs', '../model-capabilities.cjs', '../protocol/wire.cjs', '../protocol/chat.cjs', '../protocol/responses.cjs'];
+const SOURCE_FILES = ['../../package.json', 'backend.cjs', 'bridge.cjs', 'monitor.cjs', '../config.cjs', '../catalog.cjs', '../model-capabilities.cjs', '../protocol/wire.cjs', '../protocol/chat.cjs', '../protocol/responses.cjs'];
 function sourceId() {
   const hash = crypto.createHash('sha256');
   for (const name of SOURCE_FILES) hash.update(name).update('\0').update(fs.readFileSync(path.resolve(__dirname, name))).update('\0');
@@ -31,6 +31,15 @@ async function startBackend({ root, port = PORT, log = () => {} }) {
   const identity = runtimeIdentity(root);
   const instanceId = crypto.randomUUID();
   const controlToken = crypto.randomBytes(32).toString('hex');
+  let monitor;
+  try {
+    const { createMonitor } = require('./monitor.cjs');
+    monitor = createMonitor({ root });
+  } catch { log('monitor-unavailable'); }
+  const recordMetrics = data => {
+    if (!monitor) return;
+    try { monitor.record(data); } catch {}
+  };
   let activeRequests = 0;
   let draining = false;
   let closing;
@@ -110,7 +119,7 @@ async function startBackend({ root, port = PORT, log = () => {} }) {
           response.on('close', () => { if (!response.writableFinished) abort.abort(); });
           log('inference', { model: route.model, effort: route.effort, tools: chat.tools.map(t => t.name) });
           await serveChat({ request: chat, route, provider, res: response, signal: abort.signal,
-            log: ({ event, ...data }) => log(event, data) });
+            log: ({ event, ...data }) => log(event, data), onMetrics: recordMetrics });
           return;
         }
       }
@@ -126,7 +135,20 @@ async function startBackend({ root, port = PORT, log = () => {} }) {
     if (request.headers.origin) { response.writeHead(403); response.end(); return; }
     if (request.method === 'GET' && request.url === '/health') {
       response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-      response.end(JSON.stringify({ ...identity, pid: process.pid, instanceId, managementProtocol: MANAGEMENT_PROTOCOL, nativeModelsProtocol: 1, activeRequests, draining })); return;
+      response.end(JSON.stringify({ ...identity, pid: process.pid, instanceId, managementProtocol: MANAGEMENT_PROTOCOL, nativeModelsProtocol: 1, monitorProtocol: monitor ? 1 : 0, activeRequests, draining })); return;
+    }
+    if (request.method === 'GET' && request.url === '/_runtime/monitor') {
+      const provided = typeof request.headers.authorization === 'string' ? request.headers.authorization : '';
+      const expected = 'Bearer ' + controlToken;
+      if (Buffer.byteLength(provided) !== Buffer.byteLength(expected) || !crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected))) {
+        response.writeHead(403); response.end(); return;
+      }
+      Promise.resolve().then(() => monitor?.snapshot()).then(snapshot => {
+        if (response.destroyed) return;
+        response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+        response.end(JSON.stringify({ instanceId, snapshot: snapshot || null }));
+      }).catch(() => { if (!response.destroyed) { response.writeHead(503); response.end(); } });
+      return;
     }
     if (request.method === 'GET' && request.url === '/_runtime/native-models') {
       const provided = typeof request.headers.authorization === 'string' ? request.headers.authorization : '';
@@ -185,6 +207,7 @@ async function startBackend({ root, port = PORT, log = () => {} }) {
         try {
           if (JSON.parse(fs.readFileSync(stateFile, 'utf8')).instanceId === instanceId) fs.unlinkSync(stateFile);
         } catch { /* Another runtime may already own the control file. */ }
+        monitor?.close();
         resolveStopped(); resolve();
       });
       server.closeIdleConnections?.();

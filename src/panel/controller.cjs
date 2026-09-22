@@ -2,8 +2,19 @@
 const crypto = require('node:crypto');
 const { renderPanel } = require('./view.cjs');
 const { PanelInputError } = require('./model.cjs');
-function createPanelController({ vscode, context, manager, safeError }) {
+function createPanelController({ vscode, context, manager, safeError, readMonitor = async () => ({ status: 'unsupported', snapshot: null }) }) {
   let panel;
+  let monitorPending = false;
+  const refreshMonitor = async () => {
+    if (!panel || panel.visible === false || monitorPending) return;
+    const target = panel;
+    monitorPending = true;
+    try {
+      let result;
+      try { result = await readMonitor(); } catch { result = { status: 'unavailable', snapshot: null }; }
+      if (panel === target) await target.webview.postMessage({ type: 'monitor-state', result });
+    } finally { monitorPending = false; }
+  };
   let disposed = false;
   let lastState;
   const postState = async (target, state) => {
@@ -24,6 +35,7 @@ function createPanelController({ vscode, context, manager, safeError }) {
     panel.webview.html = renderPanel({ nonce: crypto.randomBytes(24).toString('base64'), cspSource: panel.webview.cspSource });
     const messages = panel.webview.onDidReceiveMessage(async message => {
       if (!message || typeof message.id !== 'string' || message.id.length > 100 || typeof message.type !== 'string') return;
+      if (message.type === 'monitor.refresh') { await refreshMonitor(); return; }
       try {
         const state = await manager.dispatch(message.type, message.payload);
         await postState(current, state);
@@ -34,7 +46,10 @@ function createPanelController({ vscode, context, manager, safeError }) {
         try { await postState(current, manager.state()); } catch {}
       }
     });
-    const closing = panel.onDidDispose(() => { messages.dispose(); closing.dispose(); if (panel === current) panel = undefined; });
+    const timer = setInterval(() => { void refreshMonitor().catch(() => {}); }, 5000);
+    timer.unref?.();
+    void refreshMonitor().catch(() => {});
+    const closing = panel.onDidDispose(() => { clearInterval(timer); messages.dispose(); closing.dispose(); if (panel === current) panel = undefined; });
   }
   context.subscriptions.push({ dispose() { disposed = true; panel?.dispose(); } });
   return { open, publish };

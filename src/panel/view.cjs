@@ -1,5 +1,6 @@
 'use strict';
 const { modelSupportsImages } = require('../model-capabilities.cjs');
+const { monitorMarkup, monitorScript } = require('./monitor-view.cjs');
 
 function escapeAttribute(value) {
   return String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
@@ -94,6 +95,10 @@ function renderPanel({ nonce, cspSource }) {
     .default-controls { display: flex; align-items: center; gap: 8px; }
     .default-controls select { min-width: 0; }
     .footnote { margin: 16px 0 0; }
+    .monitor-table-wrap { overflow: auto; max-height: 480px; }
+    .monitor-table { border-collapse: collapse; white-space: nowrap; width: 100%; }
+    .monitor-table td, .monitor-table th { padding: 7px 10px; border-bottom: 1px solid var(--vscode-panel-border, #444); text-align: left; }
+    .monitor-metric { display: inline-block; margin: 8px 22px 8px 0; }
     dialog { width: min(540px, calc(100vw - 28px)); max-height: calc(100vh - 40px); overflow: auto; margin: auto; padding: 20px; border: 1px solid var(--vscode-panel-border, #454545); border-radius: 7px; color: var(--vscode-foreground, #ddd); background: var(--vscode-editor-background, #1e1e1e); box-shadow: 0 8px 28px var(--vscode-widget-shadow, #0006); }
     dialog::backdrop { background: #0007; }
     dialog h2 { font-size: 17px; margin-bottom: 16px; }
@@ -152,16 +157,16 @@ function renderPanel({ nonce, cspSource }) {
       <div id="native-models" class="card-content"></div>
     </section>
     <p class="hint footnote">保存后在新建会话中使用。现有会话继续沿用已选择的模型。</p>
+    ${monitorMarkup()}
   </main>
   <dialog id="editor-dialog" aria-labelledby="dialog-title"></dialog>
-  <script nonce="${safeNonce}">(${panelClient.toString()})(${modelSupportsImages.toString()});</script>
+  <script nonce="${safeNonce}">const vscode = acquireVsCodeApi(); (${panelClient.toString()})(${modelSupportsImages.toString()}, vscode); ${monitorScript()}</script>
 </body>
 </html>`;
 }
 
-function panelClient(modelSupportsImages) {
+function panelClient(modelSupportsImages, vscode) {
   'use strict';
-  const vscode = acquireVsCodeApi();
   const byId = id => document.getElementById(id);
   const pending = new Map();
   let serial = 0;

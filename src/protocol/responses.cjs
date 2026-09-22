@@ -3,6 +3,7 @@
 const { randomUUID } = require('node:crypto');
 const { frame } = require('./wire.cjs');
 const { textChunk, thinkingChunk, toolChunk, stopChunk } = require('./chat.cjs');
+const { createTracker } = require('../runtime/monitor.cjs');
 const MAX_SSE_BUFFER = 64 * 1024 * 1024;
 
 function isChatFormat(format = '') { return /chat[-_\/]?completions|^(?:chat|openai)$/.test(format); }
@@ -50,6 +51,7 @@ function buildRequestBody(request, route, provider) {
     }
   }
   const body = { model: route.model, [chat ? 'messages' : 'input']: messages, stream: true };
+  if (chat) body.stream_options = { include_usage: true };
   const maxTokens = request.maxTokens ?? route.maxOutputTokens ?? route.maxTokens ?? provider.maxOutputTokens ?? provider.maxTokens;
   if (Number.isSafeInteger(maxTokens) && maxTokens > 0) body[chat ? 'max_completion_tokens' : 'max_output_tokens'] = maxTokens;
   if (route.effort) {
@@ -249,8 +251,10 @@ function processor(id, uid, chat, emit) {
   };
 }
 
-async function serveChat({ request, route, provider, res, signal, log = () => {}, timeouts = {} }) {
+async function serveChat({ request, route, provider, res, signal, log = () => {}, timeouts = {}, onMetrics = () => {} }) {
   const id = randomUUID();
+  const metrics = createTracker({ id, request, route, provider });
+  let outcome = 'error', outcomeCode = null;
   const upstreamController = new AbortController();
   const abort = () => upstreamController.abort();
   const close = () => { if (!res.writableEnded) upstreamController.abort(); };
@@ -341,8 +345,9 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
     const stream = processor(id, route.uid || request.modelUid, chat, write);
     try {
       for await (const event of events(rawChunksWithTimeout(upstream.body))) {
+        metrics.event(event, chat);
         await stream.event(event);
-        if (stream.terminal) break;
+        if (event.type === 'done' || (!chat && stream.terminal)) break;
       }
     } catch (err) {
       if (classifiedCode !== 'upstream_timeout') {
@@ -365,12 +370,15 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
     }
 
     res.end(frame(Buffer.from('{}'), 2));
+    outcome = 'success';
     record({ event: 'chat-complete', model: route.model, status, toolNames, requestId: id });
     return { status, toolNames, requestId: id };
   } catch (err) {
     clearTimer();
     const isClientCancel = signal?.aborted || res.destroyed || res.writableEnded;
     if (isClientCancel) {
+      outcome = 'cancelled';
+      outcomeCode = 'client_cancelled';
       record({ event: 'chat-aborted', model: route.model, status });
       if (!res.destroyed && !res.writableEnded) res.destroy();
       return { status, aborted: true };
@@ -390,9 +398,11 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
     } catch {
       if (!res.destroyed && !res.writableEnded) res.destroy();
     }
+    outcomeCode = classifiedCode;
     record({ event: 'chat-error', model: route.model, status, code: classifiedCode, requestId: id });
     return { status, error: true, code: classifiedCode, requestId: id };
   } finally {
+    try { onMetrics(metrics.finish(outcome, status, outcomeCode)); } catch {}
     clearTimer();
     upstreamController.abort();
     signal?.removeEventListener('abort', abort);

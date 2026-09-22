@@ -75,6 +75,21 @@ test('runtime health exposes ownership and source identity without exposing its 
   assert.equal((await f.health()).draining, false);
 });
 
+test('monitor is authenticated, origin-blocked, and client validates runtime identity', async t => {
+  const f = await fixture(t);
+  const endpoint = f.base + '/_runtime/monitor';
+  assert.equal((await fetch(endpoint)).status, 403);
+  const headers = { authorization: 'Bearer ' + f.control().token };
+  assert.equal((await fetch(endpoint, { headers: { ...headers, origin: 'https://example.com' } })).status, 403);
+  const data = await (await fetch(endpoint, { headers })).json();
+  assert.equal(data.snapshot.version, 1); assert.equal(data.snapshot.records.length, 0);
+  assert.ok(!JSON.stringify(data).includes(f.control().token));
+  const { readMonitor } = require('../src/runtime/monitor-client.cjs');
+  const result = await readMonitor({ root: f.root, port: f.backend.port });
+  assert.equal(result.status, 'ready'); assert.equal(result.snapshot.summary.requests, 0);
+  await assert.rejects(readMonitor({ root: f.root + '-wrong', port: f.backend.port }), /identity/);
+});
+
 test('safe shutdown refuses active RPCs and stops only after the complete response', async t => {
   const f = await fixture(t);
   f.setHold(true);
