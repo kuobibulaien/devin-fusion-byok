@@ -12,9 +12,14 @@ const { runtimeIdentity, controlFile, PORT, MANAGEMENT_PROTOCOL } = require('./r
 const { readReceipt, remember, saveReceipt, valueAt, restoreObject, permitted } = require('./lifecycle/owned-settings.cjs');
 const { readNativeModels } = require('./runtime/native-models.cjs');
 const { installAutoContinue } = require('./runtime/auto-continue.cjs');
+const { installGoalContinue } = require('./runtime/goal-continue.cjs');
+const { createGoalController } = require('./runtime/goal-state.cjs');
 let stopNativeSync;
 let stopAutoContinue;
 let resetAutoContinue;
+let cancelAutoContinueSession;
+let stopGoalContinue;
+let goalController;
 let connection;
 let runtimeWaitAbort;
 let activationGeneration = 0;
@@ -137,18 +142,28 @@ async function activate(context) {
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
   if (!fs.existsSync(configFile)) writeConfig(configFile, importLegacy());
   const config = () => readConfig(configFile);
-  let autoContinue;
+  let autoContinue, goalContinue;
+  const nativeMain = (() => {
+    try {
+      const native = vscode.extensions.getExtension('codeium.windsurf');
+      return native?.extensionPath && native.packageJSON?.main
+        ? path.resolve(native.extensionPath, native.packageJSON.main) : null;
+    } catch { return null; }
+  })();
   try {
-    const native = vscode.extensions.getExtension('codeium.windsurf');
-    if (native?.extensionPath && native.packageJSON?.main) {
-      const nativeMainPath = path.resolve(native.extensionPath, native.packageJSON.main);
+    if (nativeMain) {
+      goalContinue = installGoalContinue({
+        nativeMainPath: nativeMain,
+        isEnabled: () => !activationDisposed && config().enabled !== false
+      });
       autoContinue = installAutoContinue({
-        nativeMainPath,
+        nativeMainPath: nativeMain,
         isEnabled: () => config().enabled !== false && (config().autoContinueOnProviderError === true || config().autoContinueUntilPlanComplete === true),
         getOptions: () => ({
           onProviderError: config().autoContinueOnProviderError === true,
           untilPlanComplete: config().autoContinueUntilPlanComplete === true
         }),
+        isSessionSuppressed: sessionId => goalController ? goalController.ownsSession(sessionId) : false,
         log
       });
     } else {
@@ -157,8 +172,37 @@ async function activate(context) {
   } catch {
     log('auto-continue-unavailable');
   }
+  if (goalContinue) {
+    try {
+      goalController = createGoalController({
+        root,
+        transport: {
+          dispatch: request => goalContinue.dispatch(request),
+          cancel: sessionId => goalContinue.cancel(sessionId),
+          sessions: () => goalContinue.sessions(),
+          sessionStatus: sessionId => goalContinue.sessionStatus(sessionId),
+          setListener: listener => goalContinue.setListener(listener),
+          setGoalOwned: (sessionId, owned) => {
+            if (owned) cancelAutoContinueSession?.(sessionId);
+            return goalContinue.setGoalOwned(sessionId, owned);
+          }
+        },
+        isEnabled: () => !activationDisposed && config().enabled !== false,
+        isTrusted: () => vscode.workspace.isTrusted !== false,
+        reportCliPath: path.join(context.extensionPath, 'src/runtime/goal-report.cjs'),
+        log
+      });
+    } catch { goalController = undefined; log('goal-controller-unavailable'); }
+  }
   stopAutoContinue = () => { autoContinue?.dispose(); autoContinue = undefined; };
   resetAutoContinue = () => { autoContinue?.reset(); };
+  cancelAutoContinueSession = sessionId => autoContinue?.cancelSession?.(sessionId);
+  stopGoalContinue = () => {
+    try { goalController?.dispose(); } catch {}
+    goalController = undefined;
+    try { goalContinue?.dispose(); } catch {}
+    goalContinue = undefined;
+  };
   const catalog = () => { const current = config(); return buildCatalog(current.enabled === false ? { ...current, providers: [] } : current, [...nativeModels.values()]); };
   let management, manager;
   const nativeModels = new Map(), localNativeModels = new Map();
@@ -341,6 +385,7 @@ async function activate(context) {
   })));
   context.subscriptions.push(vscode.commands.registerCommand('devinFusionByok.status', () => { log('status', { runtime: connection?.status, models: config().providers.map(p => ({ name: p.name, models: p.models.length })) }); output.show(true); }));
   const disable = async () => {
+    try { goalController?.suspend({ reason: 'disabled' }); } catch { log('goal-suspend-failed'); }
     const current = config(); current.enabled = false; writeConfig(configFile, current);
     await teardown();
     const settings = vscode.workspace.getConfiguration('devin.acp');
@@ -395,8 +440,45 @@ async function activate(context) {
       else if (type === 'setAutoContinue' || type === 'setAutoContinueUntilPlanComplete') resetAutoContinue?.();
       else if (config().enabled !== false) { await ensureEnabled(); await reconcileSelection(); }
     } });
-  management = require('./panel/controller.cjs').createPanelController({ vscode, context, manager, safeError,
+  const updater = require('./update.cjs').createUpdateHost({ vscode, context,
+    onChange: () => management?.publishUpdates?.() });
+  management = require('./panel/controller.cjs').createPanelController({ vscode, context, manager, safeError, updater,
     readMonitor: () => require('./runtime/monitor-client.cjs').readMonitor({ root }) });
+  let contextObserver;
+  try {
+    const native = vscode.extensions.getExtension('codeium.windsurf');
+    if (native?.extensionPath && native.packageJSON?.main) {
+      contextObserver = require('./runtime/context-observer.cjs').installContextObserver({
+        nativeMainPath: path.resolve(native.extensionPath, native.packageJSON.main), isEnabled: () => !activationDisposed && config().enabled !== false });
+      context.subscriptions.push(contextObserver);
+    }
+    require('./panel/context-view.cjs').createContextUi({ vscode, context,
+      snapshot: () => contextObserver?.snapshot() || [], catalog,
+      readStatus: () => contextObserver?.status() || null,
+      isEnabled: () => !activationDisposed && config().enabled !== false,
+      readMonitor: () => require('./runtime/monitor-client.cjs').readMonitor({ root }) });
+  } catch { log('context-observer-unavailable'); }
+  context.subscriptions.push(require('./runtime/context-diagnostics.cjs').createContextDiagnostics({
+    root, version: require('../package.json').version,
+    readStatus: () => contextObserver?.status(), snapshot: () => contextObserver?.snapshot() || []
+  }));
+  try {
+    require('./panel/goal-view.cjs').createGoalUi({ vscode, context,
+      controller: {
+        snapshot: () => goalController ? goalController.snapshot() : {
+          enabled: config().enabled !== false, trusted: vscode.workspace.isTrusted !== false,
+          storeError: 'goal-controller-unavailable', corruptGoals: 0, sessions: [], goals: []
+        },
+        start: payload => goalController.start(payload),
+        pause: payload => goalController.pause(payload),
+        resume: payload => goalController.resume(payload),
+        accept: payload => goalController.accept(payload),
+        archive: payload => goalController.archive(payload)
+      },
+      isEnabled: () => !activationDisposed && config().enabled !== false,
+      isTrusted: () => vscode.workspace.isTrusted !== false,
+      safeError });
+  } catch { log('goal-ui-unavailable'); }
   let lastAutoError = config().autoContinueOnProviderError === true;
   let lastAutoPlan = config().autoContinueUntilPlanComplete === true;
   const onConfigChanged = () => {
@@ -428,6 +510,17 @@ async function activate(context) {
   if (config().enabled !== false) await run(ensureEnabled)();
   return { status: () => connection?.status, autoContinue: () => autoContinue?.status() };
 }
-async function teardown() { resetAutoContinue?.(); stopNativeSync?.(); stopNativeSync = undefined; activationGeneration++; runtimeWaitAbort?.abort(); reconcileHalted = true; if (connection) { const current = connection; connection = undefined; await current.dispose(); } }
-async function deactivate() { activationDisposed = true; stopAutoContinue?.(); stopAutoContinue = undefined; await teardown(); }
+async function teardown() {
+  try { goalController?.suspend({ reason: 'disabled' }); } catch {}
+  resetAutoContinue?.();
+  stopNativeSync?.(); stopNativeSync = undefined;
+  activationGeneration++; runtimeWaitAbort?.abort(); reconcileHalted = true;
+  if (connection) { const current = connection; connection = undefined; await current.dispose(); }
+}
+async function deactivate() {
+  activationDisposed = true;
+  stopAutoContinue?.(); stopAutoContinue = undefined;
+  stopGoalContinue?.(); stopGoalContinue = undefined;
+  await teardown();
+}
 module.exports = { activate, deactivate, ensureBackend, safeError };

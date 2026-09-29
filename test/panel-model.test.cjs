@@ -121,6 +121,30 @@ test('manual models support independent display names, image support, limits, an
   assert.deepEqual(f.read(), before);
 });
 
+test('omitted output limits default to 131072 while explicit saved values and low context stay untouched', async () => {
+  const f = memory();
+  await f.manager.dispatch('addModel', { providerId: 'other', model: { id: 'default-limits' } });
+  const added = f.read().providers[1].models.find(m => m.id === 'default-limits');
+  assert.equal(added.maxOutputTokens, 131072);
+  assert.equal(added.contextWindow, 272000);
+  await f.manager.dispatch('addModel', { providerId: 'other', model: { id: 'explicit-32768', maxOutputTokens: 32768 } });
+  assert.equal(f.read().providers[1].models.find(m => m.id === 'explicit-32768').maxOutputTokens, 32768);
+  const input = fixture();
+  input.providers[0].models[0].maxOutputTokens = 32768;
+  const existing = memory({ config: input });
+  await existing.manager.dispatch('ready');
+  assert.equal(existing.read().providers[0].models[0].maxOutputTokens, 32768);
+  const missing = fixture();
+  missing.providers = [{ id: 'cpa', name: 'CPA', baseUrl: 'https://cpa.invalid/v1', apiFormat: 'openai', apiKey: '', enabled: true, models: [
+    { id: 'missing-output', contextWindow: 272000 }, { id: 'low-context', contextWindow: 32000 }, { id: 'explicit-output', contextWindow: 272000, maxOutputTokens: 32768 }] }];
+  missing.sidekicks = [];
+  const state = publicState(missing);
+  const byId = id => state.providers[0].models.find(m => m.id === id);
+  assert.equal(byId('missing-output').maxOutputTokens, 131072);
+  assert.equal(byId('low-context').maxOutputTokens, 32000);
+  assert.equal(byId('explicit-output').maxOutputTokens, 32768);
+});
+
 test('model metadata edits preserve stable routing IDs and do not change another provider', async () => {
   const f = memory(), before = f.read(), previousRoutes = Object.keys(buildCatalog(before).routes);
   await f.manager.dispatch('updateModels', { providerId: 'cpa', changes: [{ id: 'lead', label: 'New display name',

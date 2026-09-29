@@ -21,9 +21,19 @@ const OBSERVED_SWE = [
 test('legacy empty effort lists gain GPT presets while retaining provider-default routing UIDs', () => {
   const catalog = buildCatalog(config());
   const gpt = Object.values(catalog.routes).filter(route => route.model === 'gpt-6-astra');
-  assert.deepEqual(gpt.map(route => route.effort), [null, 'low', 'medium', 'high', 'xhigh']);
+  assert.deepEqual(gpt.map(route => route.effort), [null, 'low', 'medium', 'high', 'xhigh', 'max']);
   const digest = crypto.createHash('sha256').update(JSON.stringify(['load', 'gpt-6-astra', null])).digest('hex').slice(0, 16);
   assert.equal(gpt[0].uid, 'dfbyok-load-gpt-6-astra-' + digest);
+  const maxRoute = gpt.at(-1);
+  assert.notEqual(maxRoute.uid, gpt[0].uid);
+  const maxModel = catalog.models.find(model => model.uid === maxRoute.uid);
+  assert.equal(maxModel.label, 'load · gpt-6-astra Max');
+  assert.deepEqual(maxModel.json.modelFamilyMetadata.entries, [{ key: 'Effort', value: { order: 5, name: 'Max', controlType: 1 } }]);
+  for (const role of ['lead', 'sidekick']) {
+    assert.ok(catalog.presetCandidates[role].some(item => item.ref.providerId === 'load' && item.ref.model === 'gpt-6-astra' && item.ref.effort === 'max'),
+      role + ' candidates expose the automatic Max preset');
+  }
+  assert.deepEqual(modelEfforts({ id: 'o3', efforts: [] }), [null, 'low', 'medium', 'high', 'xhigh', 'max']);
   assert.deepEqual(modelEfforts({ id: 'swe-2-max', efforts: [] }), [null]);
   assert.deepEqual(modelEfforts({ id: 'relay/gpt-6-astra-high', efforts: [] }), [null]);
   assert.deepEqual(modelEfforts({ id: 'custom-model', efforts: [] }), [null]);
@@ -48,7 +58,7 @@ test('every enabled import is a Sidekick without a second configuration step', (
 test('selected native Fusion effort resolves to the actual Responses and Chat API parameter', () => {
   const catalog = buildCatalog(withPresets(config()));
   const request = { systemPrompt: '', messages: [{ role: 'user', content: 'Hello' }] };
-  for (const effort of ['low', 'medium', 'high', 'xhigh']) {
+  for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
     const pair = Object.values(catalog.fusions).find(f => catalog.routes[f.leadUid].model === 'gpt-6-astra' && catalog.routes[f.leadUid].effort === effort &&
       !f.sidekickNative && catalog.routes[f.sidekickUid].model === 'swe-2-high');
     assert.ok(pair);
@@ -73,7 +83,7 @@ test('actual installed Fusion picker enables every GPT effort and imported Sidek
     familyMetadata: Object.fromEntries(m.json.modelFamilyMetadata.entries.map(e => [e.key, e.value])) }));
   const rows = native.nrV(native.nrz(models), [], undefined, false);
   assert.equal(rows.length, Object.keys(catalog.fusions).length);
-  for (const effort of ['low', 'medium', 'high', 'xhigh']) assert.ok(rows.some(row => catalog.routes[catalog.fusions[row.model.modelUid].leadUid].effort === effort));
+  for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) assert.ok(rows.some(row => catalog.routes[catalog.fusions[row.model.modelUid].leadUid].effort === effort));
 });
 
 test('selective import immediately exposes the new model in both roles and effort settings are editable', async () => {
@@ -85,8 +95,11 @@ test('selective import immediately exposes the new model in both roles and effor
   assert.equal(preview.fusionCount, 0);
   const imported = await manager.dispatch('importModels', { providerId: 'load', token: preview.importCandidates.token, ids: ['gpt-6-astra'] });
   assert.equal(imported.fusionCount, 0);
-  assert.equal(imported.presetCandidates.lead.filter(item => !item.ref.nativeUid).length, 5);
+  assert.equal(imported.presetCandidates.lead.filter(item => !item.ref.nativeUid).length, 6);
   assert.ok(imported.presetCandidates.lead.some(item => item.ref.nativeUid === 'swe-2-max'));
+  assert.ok(imported.presetCandidates.lead.some(item => item.ref.model === 'gpt-6-astra' && item.ref.effort === 'max'));
+  assert.ok(imported.presetCandidates.sidekick.some(item => item.ref.model === 'gpt-6-astra' && item.ref.effort === 'max'));
+  assert.ok(imported.presetCandidates.lead.some(item => item.ref.model === 'gpt-6-astra' && item.ref.effort === null));
   assert.ok(imported.sidekicks.some(s => s.providerId === 'load' && s.model === 'gpt-6-astra'));
   const custom = await manager.dispatch('updateModels', { providerId: 'load', changes: [{ id: 'gpt-6-astra', effortMode: 'manual', efforts: ['low', 'high'] }] });
   assert.equal(custom.fusionCount, 0);

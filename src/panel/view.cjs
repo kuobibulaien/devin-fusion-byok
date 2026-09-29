@@ -1,6 +1,7 @@
 'use strict';
 const { modelSupportsImages } = require('../model-capabilities.cjs');
 const { monitorMarkup, monitorScript } = require('./monitor-view.cjs');
+const { updateMarkup, updateScript } = require('./update-view.cjs');
 
 function escapeAttribute(value) {
   return String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
@@ -157,10 +158,11 @@ function renderPanel({ nonce, cspSource }) {
       <div id="native-models" class="card-content"></div>
     </section>
     <p class="hint footnote">保存后在新建会话中使用。现有会话继续沿用已选择的模型。</p>
+    ${updateMarkup()}
     ${monitorMarkup()}
   </main>
   <dialog id="editor-dialog" aria-labelledby="dialog-title"></dialog>
-  <script nonce="${safeNonce}">const vscode = acquireVsCodeApi(); (${panelClient.toString()})(${modelSupportsImages.toString()}, vscode); ${monitorScript()}</script>
+  <script nonce="${safeNonce}">const vscode = acquireVsCodeApi(); (${panelClient.toString()})(${modelSupportsImages.toString()}, vscode); ${monitorScript()} ${updateScript()}</script>
 </body>
 </html>`;
 }
@@ -738,7 +740,7 @@ function panelClient(modelSupportsImages, vscode) {
     const id = input(model?.id, { required: true, readOnly: Boolean(model), maxlength: 256, placeholder: '供应商返回的模型 ID', spellcheck: 'false' });
     const label = input(model?.label || '', { maxlength: 160, placeholder: '留空使用模型 ID' });
     const contextWindow = input(model?.contextWindow || 272000, { type: 'number', min: 1, step: 1, required: true });
-    const maxOutputTokens = input(model?.maxOutputTokens || 32768, { type: 'number', min: 1, step: 1, required: true });
+    const maxOutputTokens = input(model?.maxOutputTokens || 131072, { type: 'number', min: 1, step: 1, required: true });
     form.append(field('模型 ID', id), field('显示名称', label), element('div', { class: 'field-grid' },
       field('上下文容量（tokens）', contextWindow), field('最大输出（tokens）', maxOutputTokens)));
     const enabled = element('input', { type: 'checkbox', checked: model ? modelDraft.get(model.id) : true });
@@ -753,7 +755,7 @@ function panelClient(modelSupportsImages, vscode) {
     effortMode.addEventListener('change', () => { efforts.disabled = effortMode.value !== 'manual'; });
     form.append(element('div', { class: 'dialog-options field' }, element('label', { class: 'toggle' }, enabled, '启用此模型')));
     form.append(element('div', { class: 'dialog-options field' }, element('label', { class: 'toggle' }, supportsImages, '图片输入已启用')),
-      field('思考程度设置', effortMode, 'GPT/o 系列预设 Low、Medium、High、XHigh。其他模型保持默认，也可手动调整。'),
+      field('思考程度设置', effortMode, 'GPT/o 系列预设 Low、Medium、High、XHigh、Max。档位是否可用取决于供应商支持；其他模型保持默认，也可手动调整。'),
       field('手动思考档位', efforts, '填写供应商支持的档位，以逗号分隔，例如 low, medium, high。'));
     const remove = model ? element('button', { type: 'button', class: 'danger', text: '删除模型', onclick: () => {
       dialog.close();

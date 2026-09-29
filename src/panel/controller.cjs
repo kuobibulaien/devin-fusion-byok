@@ -2,7 +2,7 @@
 const crypto = require('node:crypto');
 const { renderPanel } = require('./view.cjs');
 const { PanelInputError } = require('./model.cjs');
-function createPanelController({ vscode, context, manager, safeError, readMonitor = async () => ({ status: 'unsupported', snapshot: null }) }) {
+function createPanelController({ vscode, context, manager, safeError, updater, readMonitor = async () => ({ status: 'unsupported', snapshot: null }) }) {
   let panel;
   let monitorPending = false;
   const refreshMonitor = async () => {
@@ -24,6 +24,7 @@ function createPanelController({ vscode, context, manager, safeError, readMonito
     lastState = encoded;
     return target.webview.postMessage({ type: 'state', state });
   };
+  const publishUpdates = () => panel && updater ? panel.webview.postMessage({ type: 'update-state', state: updater.snapshot() }) : undefined;
   const publish = () => panel ? postState(panel, manager.state()) : undefined;
   function open() {
     if (disposed) return;
@@ -37,6 +38,15 @@ function createPanelController({ vscode, context, manager, safeError, readMonito
       if (!message || typeof message.id !== 'string' || message.id.length > 100 || typeof message.type !== 'string') return;
       if (message.type === 'monitor.refresh') { await refreshMonitor(); return; }
       try {
+        if (message.type.startsWith('update.') && updater) {
+          if (message.type === 'update.check') await updater.check({ force: true });
+          else if (message.type === 'update.install') await updater.installUpdate();
+          else if (message.type === 'update.ignore') await updater.ignore();
+          else if (message.type === 'update.auto' && typeof message.payload?.enabled === 'boolean') await updater.setAutoCheck(message.payload.enabled);
+          else if (message.type === 'update.release') await vscode.env.openExternal(vscode.Uri.parse(updater.snapshot().releaseUrl));
+          await publishUpdates();
+          return;
+        }
         const state = await manager.dispatch(message.type, message.payload);
         await postState(current, state);
         await current.webview.postMessage({ type: 'result', id: message.id, ok: true });
@@ -52,6 +62,6 @@ function createPanelController({ vscode, context, manager, safeError, readMonito
     const closing = panel.onDidDispose(() => { clearInterval(timer); messages.dispose(); closing.dispose(); if (panel === current) panel = undefined; });
   }
   context.subscriptions.push({ dispose() { disposed = true; panel?.dispose(); } });
-  return { open, publish };
+  return { open, publish, publishUpdates };
 }
 module.exports = { createPanelController };

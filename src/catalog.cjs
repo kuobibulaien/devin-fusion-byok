@@ -488,7 +488,7 @@ function buildCatalog(config = {}, nativeModels = []) {
         if (effort !== null && (typeof effort !== 'string' || !/^[a-z0-9_-]{1,32}$/.test(effort))) throw new Error('Invalid effort value');
         const uid = `dfbyok-${slug(provider.id)}-${slug(model.id)}-${digest([provider.id, model.id, effort]).slice(0, 16)}`;
         const contextWindow = positive(model.contextWindow, 272000);
-        const maxOutputTokens = Math.min(positive(model.maxOutputTokens, 16384), contextWindow);
+        const maxOutputTokens = Math.min(positive(model.maxOutputTokens, 131072), contextWindow);
         const lead = { uid, key, familyLabel, providerId: provider.id, model: model.id, effort,
           contextWindow, maxOutputTokens, supportsImages: modelSupportsImages(model), inferenceServerUrl };
         leads.push(lead);

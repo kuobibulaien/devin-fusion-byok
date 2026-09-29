@@ -17,7 +17,7 @@ function importLegacy() {
     const providers = (Array.isArray(data) ? data : data.providers).filter(p => p.enabled !== false).map(p => ({
       id: p.id, name: p.name, baseUrl: p.baseUrl.replace(/\/$/, ''), apiKey: p.apiKey,
       apiFormat: p.type === 'openai-responses' ? 'openai-responses' : 'openai',
-      models: (p.models || []).map(m => ({ id: m.id, label: m.name || m.id, efforts: m.effortLevels || [], contextWindow: 272000, maxOutputTokens: 32768 }))
+      models: (p.models || []).map(m => ({ id: m.id, label: m.name || m.id, efforts: m.effortLevels || [], contextWindow: 272000, maxOutputTokens: 131072 }))
     }));
     return { enabled: true, providers, sidekicks: [], roleExclusions: { lead: [], sidekick: [] } };
   } catch { return { enabled: true, providers: [], sidekicks: [], roleExclusions: { lead: [], sidekick: [] } }; }
@@ -31,7 +31,7 @@ async function discover(provider) {
   if (!Array.isArray(json.data)) throw new Error('API 未返回模型列表');
   const old = new Map(provider.models.map(m => [m.id, m]));
   provider.models = [...new Set(json.data.map(m => m.id).filter(id => typeof id === 'string' && id.length <= 256))].map(id =>
-    old.get(id) || { id, label: provider.name + ' · ' + id, efforts: [], contextWindow: 272000, maxOutputTokens: 32768 });
+    old.get(id) || { id, label: provider.name + ' · ' + id, efforts: [], contextWindow: 272000, maxOutputTokens: 131072 });
   return provider.models.length;
 }
 function updateSidekicks(config) {

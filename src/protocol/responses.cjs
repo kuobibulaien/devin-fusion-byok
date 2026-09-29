@@ -2,7 +2,7 @@
 
 const { randomUUID } = require('node:crypto');
 const { frame } = require('./wire.cjs');
-const { textChunk, thinkingChunk, toolChunk, stopChunk } = require('./chat.cjs');
+const { textChunk, thinkingChunk, toolChunk, stopChunk, usageChunk } = require('./chat.cjs');
 const { createTracker } = require('../runtime/monitor.cjs');
 const MAX_SSE_BUFFER = 64 * 1024 * 1024;
 
@@ -113,6 +113,15 @@ async function* events(body) {
   if (buffer.trim()) { const event = parseEvent(buffer); if (event) yield event; }
 }
 
+function usageSnapshot(data, chat) {
+  const usage = chat ? data?.usage : data?.response?.usage;
+  if (!usage || typeof usage !== 'object') return null;
+  const input = chat ? usage.prompt_tokens : usage.input_tokens;
+  const output = chat ? usage.completion_tokens : usage.output_tokens;
+  if (!Number.isSafeInteger(input) || input < 0 || !Number.isSafeInteger(output) || output < 0) return null;
+  return { inputTokens: input, outputTokens: output };
+}
+
 function processor(id, uid, chat, emit) {
   const calls = new Map();
   const itemIndexes = new Map();
@@ -120,6 +129,7 @@ function processor(id, uid, chat, emit) {
   let terminal = false;
   let reason = 2;
   let finished = false;
+  let usage = null;
   const getCall = (index, itemId) => {
     const key = index ?? itemIndexes.get(itemId) ?? itemId;
     if (key === undefined) {
@@ -172,6 +182,8 @@ function processor(id, uid, chat, emit) {
         err.code = 'upstream_stream_error';
         throw err;
       }
+      const container = chat ? data : data.response;
+      if (container && typeof container === 'object' && Object.hasOwn(container, 'usage')) usage = usageSnapshot(data, chat);
       if (chat) {
         for (const choice of data.choices || []) {
           if ((choice.index ?? 0) !== 0) continue;
@@ -244,6 +256,7 @@ function processor(id, uid, chat, emit) {
         tools.push({ id: call.id, name: call.name, arguments: args });
       }
       if (tools.length) await emit(toolChunk(id, tools));
+      if (usage) await emit(usageChunk(id, uid, usage));
       await emit(stopChunk(id, tools.length ? 10 : reason, uid));
       finished = true;
       return tools.map(tool => tool.name);

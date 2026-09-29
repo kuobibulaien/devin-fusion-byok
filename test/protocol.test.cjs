@@ -157,27 +157,29 @@ for (const snake of [false, true]) test(`native ${snake ? 'snake_case' : 'camelC
 
 test('Responses and Chat requests preserve history, pictures and exact tool definitions', () => {
   const request = parseChat(nativeRequest());
-  for (const apiFormat of ['openai-responses', 'chat-completions']) {
-    const body = buildRequestBody(request, { model: 'chosen-model', effort: 'xhigh' }, { apiFormat });
-    assert.equal(body.model, 'chosen-model');
-    const chat = apiFormat === 'chat-completions';
-    const messages = chat ? body.messages : body.input;
-    assert.equal(messages[0].content, request.systemPrompt);
-    assert.equal(messages[1].content[1].type, chat ? 'image_url' : 'input_image');
-    assert.equal(messages.at(-2).content, 'System message in the middle');
-    assert.equal(messages.at(-1).content, 'User after tool');
-    assert.deepEqual(body.tools.map(tool => (tool.function || tool).name), request.tools.map(tool => tool.name));
-    assert.deepEqual((body.tools[1].function || body.tools[1]).parameters, request.tools[1].parameters);
-    if (chat) {
-      assert.equal(messages[2].tool_calls[0].function.arguments, request.messages[1].toolCalls[0].arguments);
-      assert.equal(body.tool_choice.function.name, 'sidekick');
-      assert.equal(body.reasoning_effort, 'xhigh');
-    } else {
-      assert.equal(messages[3].type, 'function_call');
-      assert.equal(messages[4].type, 'function_call_output');
-      assert.equal(messages[3].arguments, request.messages[1].toolCalls[0].arguments);
-      assert.equal(body.tool_choice.name, 'sidekick');
-      assert.equal(body.reasoning.effort, 'xhigh');
+  for (const effort of ['xhigh', 'max']) {
+    for (const apiFormat of ['openai-responses', 'chat-completions']) {
+      const body = buildRequestBody(request, { model: 'chosen-model', effort }, { apiFormat });
+      assert.equal(body.model, 'chosen-model');
+      const chat = apiFormat === 'chat-completions';
+      const messages = chat ? body.messages : body.input;
+      assert.equal(messages[0].content, request.systemPrompt);
+      assert.equal(messages[1].content[1].type, chat ? 'image_url' : 'input_image');
+      assert.equal(messages.at(-2).content, 'System message in the middle');
+      assert.equal(messages.at(-1).content, 'User after tool');
+      assert.deepEqual(body.tools.map(tool => (tool.function || tool).name), request.tools.map(tool => tool.name));
+      assert.deepEqual((body.tools[1].function || body.tools[1]).parameters, request.tools[1].parameters);
+      if (chat) {
+        assert.equal(messages[2].tool_calls[0].function.arguments, request.messages[1].toolCalls[0].arguments);
+        assert.equal(body.tool_choice.function.name, 'sidekick');
+        assert.equal(body.reasoning_effort, effort);
+      } else {
+        assert.equal(messages[3].type, 'function_call');
+        assert.equal(messages[4].type, 'function_call_output');
+        assert.equal(messages[3].arguments, request.messages[1].toolCalls[0].arguments);
+        assert.equal(body.tool_choice.name, 'sidekick');
+        assert.equal(body.reasoning.effort, effort);
+      }
     }
   }
 });
@@ -214,7 +216,7 @@ test('Responses completes parallel done-only calls and Unicode split across TCP 
   const tools = messages.flatMap(message => fields(message, 6)).map(field => ({ name: str(field.value, 2), args: str(field.value, 3) }));
   assert.deepEqual(tools, [{ name: 'sidekick', args: '{ "prompt": "check" }' }, { name: 'mcp__service__tool', args: '{"cmd":"run"}' }]);
   assert.equal(num(messages.at(-1), 5), 10);
-  assert.equal(str(messages.at(-1), 20), 'local-cpa-lead');
+  assert.equal(str(messages.at(-1), 23), 'local-cpa-lead');
   assert.equal(eos, 1);
   assert.equal(app.requests[0].url, '/v1/responses');
   assert.equal(app.requests[0].auth, 'Bearer fake-provider-secret');
@@ -431,4 +433,128 @@ test('malformed non-SSE content-type outputs invalid format message', async t =>
   assert.equal(result.messages.map(message => str(message, 3)).join(''), 'Provider response format is invalid.');
   assert.equal(num(result.messages.at(-1), 5), 13);
   assert.ok(app.logs.some(l => l.event === 'chat-error' && l.code === 'upstream_content_type'));
+});
+
+test('Responses forwards native usage field 7 after a valid completed snapshot', async t => {
+  const app = await bridge(t, async (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(event({ type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: 'ok' }));
+    res.end(event({ type: 'response.completed', response: { status: 'completed', output: [], usage: { input_tokens: 21, output_tokens: 7 } } }));
+  });
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  const usage = fields(result.messages.at(-2), 7)[0]?.value;
+  assert.ok(usage, 'usage message precedes the stop chunk');
+  assert.equal(num(usage, 2), 21);
+  assert.equal(num(usage, 3), 7);
+  assert.equal(str(usage, 7), str(result.messages.at(-2), 1));
+  assert.equal(str(usage, 9), 'local-cpa-lead');
+  assert.equal(num(result.messages.at(-1), 5), 2);
+  assert.equal(str(result.messages.at(-1), 23), 'local-cpa-lead');
+});
+
+test('Chat forwards usage after finish_reason and accepts a real zero', async t => {
+  const app = await bridge(t, async (_, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(event({ choices: [{ delta: { content: 'hi' }, finish_reason: 'stop' }] }));
+    res.write(event({ choices: [], usage: { prompt_tokens: 0, completion_tokens: 0 } }));
+    res.end('data: [DONE]\n\n');
+  }, 'openai');
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  const usage = fields(result.messages.at(-2), 7)[0]?.value;
+  assert.ok(usage, 'a reported zero still emits usage');
+  assert.equal(num(usage, 2), 0);
+  assert.equal(num(usage, 3), 0);
+  assert.equal(num(result.messages.at(-1), 5), 2);
+});
+
+test('usage is suppressed for missing, partial, fractional, negative and oversized snapshots', async t => {
+  const cases = [
+    { prompt_tokens: 5 },
+    { completion_tokens: 5 },
+    { prompt_tokens: 5.5, completion_tokens: 5 },
+    { prompt_tokens: -1, completion_tokens: 5 },
+    { prompt_tokens: Number.MAX_SAFE_INTEGER + 2, completion_tokens: 5 },
+    { prompt_tokens: 5, completion_tokens: Number.MAX_SAFE_INTEGER + 2 }
+  ];
+  for (const usage of cases) {
+    const app = await bridge(t, async (_, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(event({ choices: [{ delta: { content: 'x' }, finish_reason: 'stop' }] }));
+      res.write(event({ choices: [], usage }));
+      res.end('data: [DONE]\n\n');
+    }, 'openai');
+    const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+    assert.equal(result.messages.flatMap(message => fields(message, 7)).length, 0, JSON.stringify(usage));
+    assert.equal(num(result.messages.at(-1), 5), 2, JSON.stringify(usage));
+  }
+});
+
+test('repeated snapshots replace rather than merge and a later invalid snapshot suppresses usage', async t => {
+  const app = await bridge(t, async (_, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(event({ choices: [{ delta: { content: 'a' }, finish_reason: 'stop' }] }));
+    res.write(event({ choices: [], usage: { prompt_tokens: 100, completion_tokens: 40 } }));
+    res.write(event({ choices: [], usage: { prompt_tokens: 11, completion_tokens: 4 } }));
+    res.end('data: [DONE]\n\n');
+  }, 'openai');
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  const usages = result.messages.flatMap(message => fields(message, 7));
+  assert.equal(usages.length, 1);
+  assert.equal(num(usages[0].value, 2), 11);
+  assert.equal(num(usages[0].value, 3), 4);
+
+  const partial = await bridge(t, async (_, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(event({ choices: [{ delta: { content: 'a' }, finish_reason: 'stop' }] }));
+    res.write(event({ choices: [], usage: { prompt_tokens: 9, completion_tokens: 3 } }));
+    res.write(event({ choices: [], usage: { prompt_tokens: 5 } }));
+    res.end('data: [DONE]\n\n');
+  }, 'openai');
+  const replaced = unpack(Buffer.from(await (await fetch(partial.url)).arrayBuffer()));
+  assert.equal(replaced.messages.flatMap(message => fields(message, 7)).length, 0);
+  assert.equal(num(replaced.messages.at(-1), 5), 2);
+});
+
+test('stop chunk writes the model uid to actual_model_uid and never to field 20', async t => {
+  const app = await bridge(t, async (_, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(event({ type: 'response.completed', response: { status: 'completed', output: [] } }));
+  });
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  const stop = result.messages.at(-1);
+  assert.equal(str(stop, 23), 'local-cpa-lead');
+  assert.equal(fields(stop, 20).length, 0);
+});
+
+test('an explicitly present malformed usage clears a previous valid snapshot', async t => {
+  const run = async mutate => {
+    const app = await bridge(t, async (_, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(event({ choices: [{ delta: { content: 'a' }, finish_reason: 'stop' }] }));
+      res.write(event({ choices: [], usage: { prompt_tokens: 9, completion_tokens: 3 } }));
+      res.write(event({ choices: [], usage: mutate }));
+      res.end('data: [DONE]\n\n');
+    }, 'openai');
+    return unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  };
+  for (const malformed of [7, 'usage', null]) {
+    const result = await run(malformed);
+    assert.equal(result.messages.flatMap(message => fields(message, 7)).length, 0, JSON.stringify(malformed));
+    assert.equal(num(result.messages.at(-1), 5), 2, JSON.stringify(malformed));
+  }
+});
+
+test('events without a usage property retain the latest valid snapshot', async t => {
+  const app = await bridge(t, async (_, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(event({ choices: [], usage: { prompt_tokens: 13, completion_tokens: 6 } }));
+    res.write(event({ choices: [{ delta: { content: 'a' }, finish_reason: 'stop' }] }));
+    res.write(event({ choices: [] }));
+    res.end('data: [DONE]\n\n');
+  }, 'openai');
+  const result = unpack(Buffer.from(await (await fetch(app.url)).arrayBuffer()));
+  const usages = result.messages.flatMap(message => fields(message, 7));
+  assert.equal(usages.length, 1);
+  assert.equal(num(usages[0].value, 2), 13);
+  assert.equal(num(usages[0].value, 3), 6);
 });

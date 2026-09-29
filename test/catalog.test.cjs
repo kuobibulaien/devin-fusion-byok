@@ -109,6 +109,23 @@ test('duplicate labels are disambiguated and invalid provider/Sidekick identitie
   assert.throws(() => buildCatalog({ providers: [{ id: 'a', models: [{ id: 'x', efforts: ['HIGH'] }] }] }), /effort/);
 });
 
+test('missing output limits default to 131072 and clamp to the model context window', () => {
+  const input = { providers: [{ id: 'load', name: 'Load', models: [
+    { id: 'wide', contextWindow: 272000 }, { id: 'narrow', contextWindow: 32000 }, { id: 'explicit', contextWindow: 272000, maxOutputTokens: 32768 }] }] };
+  const result = buildCatalog(input);
+  const routeFor = id => Object.values(result.routes).find(route => route.model === id);
+  assert.equal(routeFor('wide').maxOutputTokens, 131072);
+  assert.equal(routeFor('narrow').maxOutputTokens, 32000);
+  assert.equal(routeFor('explicit').maxOutputTokens, 32768);
+  for (const id of ['wide', 'narrow', 'explicit']) {
+    const model = result.models.find(item => item.uid === routeFor(id).uid);
+    assert.equal(model.json.modelInfo.maxOutputTokens, routeFor(id).maxOutputTokens);
+    assert.equal(num(model.raw, 18), model.json.maxTokens);
+  }
+  const omittedContext = buildCatalog({ providers: [{ id: 'load', name: 'Load', models: [{ id: 'default-context' }] }] });
+  assert.equal(Object.values(omittedContext.routes)[0].maxOutputTokens, 131072);
+});
+
 test('explicit inference server override applies to own models and leaves native records byte-identical', () => {
   const input = config();
   input.inferenceServerUrl = 'http://127.0.0.1:39842';

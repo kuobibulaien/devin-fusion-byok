@@ -10,7 +10,7 @@ function modelEfforts(model) {
   if (/^(?:gpt-[56](?:[.-]|$)|o[134](?:-|$))/i.test(id) &&
       !/(?:^|-)(?:none|minimal|low|medium|high|xhigh|max|ultra)(?:-|$)/i.test(id)) {
     // The null variant retains previously saved UIDs and provider-default behavior.
-    return [null, 'low', 'medium', 'high', 'xhigh'];
+    return [null, 'low', 'medium', 'high', 'xhigh', 'max'];
   }
   return [null];
 }

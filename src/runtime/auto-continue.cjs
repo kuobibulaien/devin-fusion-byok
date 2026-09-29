@@ -39,7 +39,7 @@ function restore(target, key, wrapper, descriptor) {
   else delete target[key];
 }
 
-function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptions = () => ({ onProviderError: true, untilPlanComplete: false }), log = () => {}, scheduler } = {}) {
+function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptions = () => ({ onProviderError: true, untilPlanComplete: false }), log = () => {}, scheduler, isSessionSuppressed } = {}) {
   if (typeof nativeMainPath !== 'string' || !nativeMainPath) {
     throw new TypeError('nativeMainPath is required');
   }
@@ -63,6 +63,11 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
 
   function report(event, data) {
     try { log(event, data); } catch {}
+  }
+
+  function sessionSuppressed(sessionId) {
+    if (typeof isSessionSuppressed !== 'function' || !sessionId) return false;
+    try { return isSessionSuppressed(sessionId) === true; } catch { return true; }
   }
 
   function detach(connector) {
@@ -155,7 +160,7 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
 
       const timer = scheduleTimer(() => {
         entry.timers.delete(sessionId);
-        if (disposed || !entry.active || !isEnabled()) return;
+        if (disposed || !entry.active || !isEnabled() || sessionSuppressed(sessionId)) return;
         const currentTurn = entry.sessions.get(sessionId);
         if (!currentTurn || currentTurn.generation !== generation || currentTurn.retryDisallowed) return;
         executeAuto(sessionId, attempts, currentTurn);
@@ -276,10 +281,10 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
           turn.consumed = true;
           const options = getOptions() || {};
 
-          const shouldRetryError = !turn.retryDisallowed && isEnabled() && options.onProviderError !== false && matchesProviderError(turn.tail);
+          const shouldRetryError = !turn.retryDisallowed && isEnabled() && !sessionSuppressed(sessionId) && options.onProviderError !== false && matchesProviderError(turn.tail);
           const hasPendingPlan = checkHasPendingPlan(turn);
           const isBlocked = matchesTerminalBlocker(turn.tail);
-          const shouldRetryPlan = !turn.retryDisallowed && !isBlocked && isEnabled() && options.untilPlanComplete === true &&
+          const shouldRetryPlan = !turn.retryDisallowed && !isBlocked && isEnabled() && !sessionSuppressed(sessionId) && options.untilPlanComplete === true &&
             hasPendingPlan && (res.stopReason === 'end_turn' || res.stopReason === 'max_tokens');
 
           if (shouldRetryError) {
@@ -320,7 +325,7 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
           const isExactMsg = (msg === TARGET_ERROR || msg === TARGET_ERROR + '.');
           const options = getOptions() || {};
 
-          if (isEnabled() && options.onProviderError !== false && isExactMsg) {
+          if (isEnabled() && options.onProviderError !== false && isExactMsg && !sessionSuppressed(sessionId)) {
             turn.lastResult = { value: err, isReject: true };
             scheduleAuto(sessionId, turn, 'error');
           } else {
@@ -459,10 +464,10 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
             const options = getOptions() || {};
             const isError = matchesProviderError(turn.tail);
             const isBlocked = matchesTerminalBlocker(turn.tail);
-            const shouldRetryError = !turn.retryDisallowed && isEnabled() && options.onProviderError !== false && isError;
+            const shouldRetryError = !turn.retryDisallowed && isEnabled() && !sessionSuppressed(sessionId) && options.onProviderError !== false && isError;
             const hasPendingPlan = checkHasPendingPlan(turn);
             const allowedPlanReason = update.stopReason === 'end_turn' || update.stopReason === 'max_tokens';
-            const shouldRetryPlan = !turn.retryDisallowed && !isBlocked && isEnabled() && options.untilPlanComplete === true && hasPendingPlan && allowedPlanReason;
+            const shouldRetryPlan = !turn.retryDisallowed && !isBlocked && isEnabled() && !sessionSuppressed(sessionId) && options.untilPlanComplete === true && hasPendingPlan && allowedPlanReason;
 
             if (shouldRetryError) {
               scheduleAuto(sessionId, turn, 'error');
@@ -566,6 +571,7 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
       const enabled = isEnabled();
       const isAuto = autoAttempts.has(request);
       const isV2 = connector.protocolVersion >= 2;
+      const suppressed = !isAuto && sessionSuppressed(sessionId);
 
       let manualTurn;
       if (!disposed && entry.active && sessionId && method === 'session/prompt') {
@@ -580,7 +586,7 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
               else previousTurn.deferred.resolve(previousTurn.lastResult.value);
             }
           }
-          if (enabled) {
+          if (enabled && !suppressed) {
             manualTurn = {
               generation: ++entry.turnGeneration,
               attempts: 0,
@@ -630,7 +636,7 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
         throw err;
       }
 
-      if (!enabled || !activeTurn || isV2) {
+      if (!enabled || suppressed || !activeTurn || isV2) {
         if (isV2 && activeTurn && originalPromise && typeof originalPromise.catch === 'function') {
           originalPromise.catch(() => {
             if (entry.sessions.get(sessionId) === activeTurn && activeTurn.generation === currentGen) {
@@ -754,6 +760,25 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
         }
         entry.sessions.clear();
       }
+    },
+    cancelSession(sessionId) {
+      if (!sessionId) return false;
+      let cancelled = false;
+      for (const entry of connections.values()) {
+        const timer = entry.timers.get(sessionId);
+        if (timer !== undefined) { clearTimer(timer); entry.timers.delete(sessionId); cancelled = true; }
+        const turn = entry.sessions.get(sessionId);
+        if (!turn) continue;
+        turn.retryDisallowed = true;
+        if (turn.deferred && !turn.deferred.settled && turn.lastResult) {
+          turn.deferred.settled = true;
+          if (turn.lastResult.isReject) turn.deferred.reject(turn.lastResult.value);
+          else turn.deferred.resolve(turn.lastResult.value);
+        }
+        entry.sessions.delete(sessionId);
+        cancelled = true;
+      }
+      return cancelled;
     },
     dispose() {
       if (disposed) return;

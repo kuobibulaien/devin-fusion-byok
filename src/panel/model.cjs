@@ -68,7 +68,7 @@ function publicState(config, selectedFusionUid, nativeModels = [], autoContinueS
       apiFormat: provider.apiFormat, enabled: provider.enabled !== false, keyConfigured: !!provider.apiKey,
       models: provider.models.map(model => ({ id: model.id, label: model.label || model.id, enabled: model.enabled !== false,
         efforts: model.efforts || [], effortMode: model.effortMode || (model.efforts?.length ? 'manual' : 'auto'),
-        contextWindow: model.contextWindow || 272000, maxOutputTokens: model.maxOutputTokens || 16384,
+        contextWindow: model.contextWindow || 272000, maxOutputTokens: model.maxOutputTokens || Math.min(131072, model.contextWindow || 272000),
         supportsImages: modelSupportsImages(model) })) })),
     sidekicks: catalog.sidekicks.map(sidekick => sidekick.native
       ? { nativeUid: sidekick.uid, label: sidekick.label } : { providerId: sidekick.providerId, model: sidekick.model }),
@@ -197,7 +197,7 @@ function createManager({ read, write, discover = discoverModels, afterChange = a
         const provider = providerAt(config, payload.providerId), input = payload.model;
         const id = text(input?.id, '模型 ID');
         if (provider.models.some(m => m.id === id)) fail('该模型已经在列表中。');
-        provider.models.push(modelPatch(input, { id, label: id, enabled: true, efforts: [], contextWindow: 272000, maxOutputTokens: 32768, source: 'manual' }));
+        provider.models.push(modelPatch(input, { id, label: id, enabled: true, efforts: [], contextWindow: 272000, maxOutputTokens: 131072, source: 'manual' }));
         break;
       }
       case 'setSidekicks': {

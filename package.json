@@ -2,7 +2,7 @@
   "name": "devin-fusion-byok",
   "displayName": "Devin Fusion BYOK",
   "description": "Import OpenAI-compatible models into Devin Local and native Fusion through runtime bridges.",
-  "version": "0.3.23",
+  "version": "0.3.33",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -31,6 +31,10 @@
   "contributes": {
     "commands": [
       {
+        "command": "devinFusionByok.checkUpdates",
+        "title": "Fusion BYOK：检查更新"
+      },
+      {
         "command": "devinFusionByok.openPanel",
         "title": "Fusion BYOK：控制面板"
       },
@@ -45,6 +49,14 @@
       {
         "command": "devinFusionByok.selectFusion",
         "title": "Fusion BYOK：选择 Fusion 预设"
+      },
+      {
+        "command": "devinFusionByok.contextDetails",
+        "title": "Fusion BYOK：上下文与性能"
+      },
+      {
+        "command": "devinFusionByok.goal",
+        "title": "Fusion BYOK：目标（Goal）"
       },
       {
         "command": "devinFusionByok.status",

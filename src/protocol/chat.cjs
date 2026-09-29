@@ -78,6 +78,10 @@ function thinkingChunk(id, text) { return Buffer.concat([...prefix(id), s(9, tex
 function toolChunk(id, tools) {
   return Buffer.concat([...prefix(id), ...tools.map(tool => m(6, Buffer.concat([s(1, tool.id), s(2, tool.name), s(3, tool.arguments ?? tool.arguments_json ?? '')])))]);
 }
-function stopChunk(id, reason = 2, modelUid = '') { return Buffer.concat([...prefix(id), v(5, reason), ...(modelUid ? [s(20, modelUid)] : [])]); }
+function stopChunk(id, reason = 2, modelUid = '') { return Buffer.concat([...prefix(id), v(5, reason), ...(modelUid ? [s(23, modelUid)] : [])]); }
+function usageChunk(id, modelUid, usage) {
+  return Buffer.concat([...prefix(id),
+    m(7, Buffer.concat([v(2, usage.inputTokens), v(3, usage.outputTokens), s(7, id), s(9, modelUid)]))]);
+}
 
-module.exports = { parseChat, textChunk, thinkingChunk, toolChunk, stopChunk };
+module.exports = { parseChat, textChunk, thinkingChunk, toolChunk, stopChunk, usageChunk };
