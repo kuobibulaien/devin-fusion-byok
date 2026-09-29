@@ -183,6 +183,7 @@ async function activate(context) {
           sessions: () => goalContinue.sessions(),
           sessionStatus: sessionId => goalContinue.sessionStatus(sessionId),
           setListener: listener => goalContinue.setListener(listener),
+          setCommandHandler: handler => goalContinue.setCommandHandler(handler),
           setGoalOwned: (sessionId, owned) => {
             if (owned) cancelAutoContinueSession?.(sessionId);
             return goalContinue.setGoalOwned(sessionId, owned);

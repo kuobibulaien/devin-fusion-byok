@@ -158,7 +158,7 @@ test('report CLI accepts a valid submission and rejects malformed, traversal and
   const duplicate = run(['--store', storeRoot, '--capability', token, JSON.stringify({ status: 'review', evidence: 'again' })]);
   assert.equal(duplicate.code, 1);
   assert.match(duplicate.out.error, /已经提交过报告/);
-  const badStatus = run(['--store', storeRoot, '--capability', token, JSON.stringify({ status: 'complete', evidence: 'x' })]);
+  const badStatus = run(['--store', storeRoot, '--capability', token, JSON.stringify({ status: 'done', evidence: 'x' })]);
   assert.equal(badStatus.code, 2);
   const emptyEvidence = run(['--store', storeRoot, '--capability', token, JSON.stringify({ status: 'progress', evidence: '   ' })]);
   assert.equal(emptyEvidence.code, 2);

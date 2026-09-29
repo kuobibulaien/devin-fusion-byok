@@ -16,7 +16,7 @@ const REASON_LABELS = {
   'capability-failed': '报告凭据创建失败，已暂停', 'ownership-lost': '该会话归属已变化，已暂停',
   'run-ended-unknown': '运行结束状态未知，已暂停', cancelled: '运行被取消', refusal: '模型拒绝继续',
   permission: '等待权限确认', 'session-inactive': '会话已结束或不可用', disconnected: '连接已断开',
-  interrupted: '运行被中断', suspended: '已挂起', accepted: '已由用户验收'
+  interrupted: '运行被中断', suspended: '已挂起', accepted: '已由用户验收', achieved: '模型已提交完成证据'
 };
 function statusText(goal) {
   const base = STATUS_LABELS[goal.status] || goal.status;
@@ -35,25 +35,17 @@ const reason=goal.reason?(REASON_LABELS[goal.reason]||goal.reason):'';return rea
 function option(value,label){const o=document.createElement('option');o.value=value;o.textContent=label;return o;}
 function sessionLabel(id){const session=sessions.find(s=>s.sessionId===id);const label=session?.title||id;
 return sessions.filter(s=>(s.title||s.sessionId)===label).length>1?label+' · '+id:label;}
-function renderSessions(){const select=el('session');select.replaceChildren();
-select.append(option('','请选择空闲会话'));
-for(const s of sessions){const o=option(s.sessionId,sessionLabel(s.sessionId)+'（'+(SESSION_LABELS[s.status]||SESSION_LABELS.unknown)+'）');o.title=s.sessionId;if(s.status!=='idle')o.disabled=true;select.append(o);}
-const usable=sessions.filter(s=>s.status==='idle');
-if(sessions.some(s=>s.sessionId===selectedSession))select.value=selectedSession;
-const chosen=sessions.find(s=>s.sessionId===select.value);
-el('sessionHint').textContent=usable.length?'仅可对空闲会话启动；请手动选择。':'当前没有已观察为空闲的会话。';
-el('start').disabled=!state.enabled||!state.trusted||!select.value||!chosen||chosen.status!=='idle';}
 function render(){if(!state)return;el('enabled').textContent=state.enabled?'已启用':'已停用';
 el('trusted').textContent=state.trusted?'工作区已信任':'工作区未信任';
 el('storeError').textContent=state.storeError?('状态存储问题：'+state.storeError):'';
 el('corrupt').textContent=state.corruptGoals?('发现 '+state.corruptGoals+' 条无法解析的目标记录，已保留未覆盖。'):'';
 el('error').textContent=errorText;el('notice').textContent=notice;
-sessions=state.sessions||[];renderSessions();
+sessions=state.sessions||[];
 const list=el('goals');list.replaceChildren();
 for(const goal of state.goals||[]){const item=document.createElement('div');item.className='goal';
 const head=document.createElement('div');head.className='goalhead';head.textContent=statusText(goal)+' · '+sessionLabel(goal.sessionId);item.append(head);
 const meta=document.createElement('div');meta.className='meta';meta.textContent='运行额度已使用 '+goal.runsStarted+' / '+goal.maxRuns+'（含派发准备，非模型回复数）· 修订 '+goal.revision+(goal.archived?' · 已归档':'');item.append(meta);
-const objective=document.createElement('pre');objective.textContent='目标：'+goal.objective+'\\n验收标准：'+goal.criteria;item.append(objective);
+const objective=document.createElement('pre');objective.textContent='目标：'+goal.objective+(goal.criteria&&goal.criteria!==goal.objective?'\\n验收标准：'+goal.criteria:'');item.append(objective);
 const evidence=document.createElement('div');evidence.className='evidence';
 if(!goal.evidence.length)evidence.textContent='尚无证据。';
 for(const entry of goal.evidence){const line=document.createElement('pre');line.textContent='['+entry.status+'] '+entry.evidence;evidence.append(line);}
@@ -73,14 +65,12 @@ vscode.postMessage({type,id,payload,confirm:needsConfirm===true});}
 window.addEventListener('message',event=>{const data=event.data;if(!data)return;
 if(data.type==='goal-state'){state=data.state;render();return;}
 if(data.type==='goal-result'){if(!data.ok){errorText=data.error||'操作失败。';}else{notice=data.notice||'';}render();}});
-el('start').onclick=()=>{send('goal.start',{sessionId:el('session').value,objective:el('objective').value,criteria:el('criteria').value,maxRuns:Number(el('maxRuns').value)});};
 el('refresh').onclick=()=>send('goal.refresh',{});
-el('session').addEventListener('change',()=>{selectedSession=el('session').value;renderSessions();});
 vscode.postMessage({type:'goal.ready',id:String(Math.random()),payload:{}});`;
 }
 
 function goalHtml(nonce) {
-  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';"><style nonce="${nonce}">body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background);padding:20px;line-height:1.7}label{display:block;margin-top:12px}input,textarea,select{width:100%;box-sizing:border-box;padding:6px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border,transparent)}textarea{min-height:70px}.goal{border:1px solid var(--vscode-panel-border,#555);padding:12px;margin-top:12px}.goalhead{font-weight:600}.meta{opacity:.8}.actions{margin-top:8px;display:flex;gap:8px;flex-wrap:wrap}button{padding:5px 10px;cursor:pointer}.error{color:var(--vscode-errorForeground)}.notice{color:var(--vscode-descriptionForeground)}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;margin:6px 0}.hint{opacity:.7}.evidence{border-left:2px solid var(--vscode-panel-border,#555);padding-left:8px;margin-top:6px}</style></head><body><h2>Fusion BYOK Goal</h2><p class="hint">一个会话同一时间只允许一个目标；只有人工验收才能把目标标记为已完成，“待验收”不等于“已完成”。自动运行次数按已派发的 Goal 提示计数。</p><p>插件：<span id="enabled">未知</span> · <span id="trusted">未知</span></p><p id="storeError" class="error" role="status"></p><p id="corrupt" class="error" role="status"></p><label for="session">会话（仅空闲可用）</label><select id="session"></select><p id="sessionHint" class="hint"></p><label for="objective">目标描述</label><textarea id="objective" maxlength="4000"></textarea><label for="criteria">验收标准（必填）</label><textarea id="criteria" maxlength="8000"></textarea><label for="maxRuns">运行上限（1-100，默认 10）</label><input id="maxRuns" type="number" min="1" max="100" value="10"><div class="actions"><button id="start">启动目标</button><button id="refresh">刷新</button></div><p id="error" class="error" role="status"></p><p id="notice" class="notice" role="status"></p><div id="goals"></div><h3>历史（已归档）</h3><div id="history"></div><script nonce="${nonce}">${goalScript()}</script></body></html>`;
+  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';"><style nonce="${nonce}">body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background);padding:20px;line-height:1.7}label{display:block;margin-top:12px}input,textarea,select{width:100%;box-sizing:border-box;padding:6px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border,transparent)}textarea{min-height:70px}.goal{border:1px solid var(--vscode-panel-border,#555);padding:12px;margin-top:12px}.goalhead{font-weight:600}.meta{opacity:.8}.actions{margin-top:8px;display:flex;gap:8px;flex-wrap:wrap}button{padding:5px 10px;cursor:pointer}.error{color:var(--vscode-errorForeground)}.notice{color:var(--vscode-descriptionForeground)}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;margin:6px 0}.hint{opacity:.7}.evidence{border-left:2px solid var(--vscode-panel-border,#555);padding-left:8px;margin-top:6px}</style></head><body><h2>Fusion BYOK Goal</h2><p class="hint">在 Devin 聊天框输入 <b>/goal 要达成的目标</b> 即可在当前对话启动，模型会一轮轮自动推进，直到它提交带证据的完成报告。<br>/goal 查看进度 · /goal pause 暂停 · /goal resume 继续 · /goal clear 清除。这里只用于查看和管理。</p><p>插件：<span id="enabled">未知</span> · <span id="trusted">未知</span></p><p id="storeError" class="error" role="status"></p><p id="corrupt" class="error" role="status"></p><div class="actions"><button id="refresh">刷新</button></div><p id="error" class="error" role="status"></p><p id="notice" class="notice" role="status"></p><div id="goals"></div><h3>历史（已归档）</h3><div id="history"></div><script nonce="${nonce}">${goalScript()}</script></body></html>`;
 }
 
 function createGoalUi({ vscode, context, controller, isEnabled = () => true, isTrusted = () => true, safeError = () => ({ message: '操作失败。' }) }) {
@@ -91,7 +81,7 @@ function createGoalUi({ vscode, context, controller, isEnabled = () => true, isT
     let count = 0;
     try { count = (controller.snapshot().goals || []).filter(goal => !goal.archived).length; } catch {}
     item.text = '$(target) Goal' + (count ? ' ' + count : '');
-    item.tooltip = 'Fusion BYOK Goal：一个会话一个目标，人工验收。';
+    item.tooltip = 'Fusion BYOK Goal：在聊天框输入 /goal 目标 即可启动。';
     item.command = 'devinFusionByok.goal';
     item.show();
   }

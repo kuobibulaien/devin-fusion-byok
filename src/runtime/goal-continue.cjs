@@ -15,6 +15,36 @@ const INTERRUPT_METHODS = new Set([
   'session/request_permission', 'elicitation/create', '_session/elicitation', 'session/permission_request'
 ]);
 
+const GOAL_COMMAND = Object.freeze({
+  name: 'goal',
+  description: 'Fusion BYOK：设定目标并自动持续推进，直到完成（/goal 查看，/goal pause|resume|clear 控制）',
+  input: { hint: '要达成的目标，写清楚怎样算完成' }
+});
+const GOAL_COMMAND_RE = /^\/goal(?:\s+([\s\S]*))?$/;
+
+function parseGoalCommand(prompt) {
+  if (!Array.isArray(prompt) || prompt.length === 0) return null;
+  if (!prompt.every(block => block && block.type === 'text' && typeof block.text === 'string')) return null;
+  const match = GOAL_COMMAND_RE.exec(prompt.map(block => block.text).join('').trim());
+  if (!match) return null;
+  const rest = (match[1] || '').trim();
+  const word = rest.toLowerCase();
+  if (!rest) return { action: 'status', text: '' };
+  if (['pause', 'resume', 'clear', 'status'].includes(word)) return { action: word, text: '' };
+  return { action: 'start', text: rest };
+}
+function withGoalCommand(message) {
+  const update = message?.params?.update;
+  if (message?.method !== 'session/update' || update?.sessionUpdate !== 'available_commands_update' ||
+      !Array.isArray(update.availableCommands) || update.availableCommands.some(command => command?.name === GOAL_COMMAND.name)) {
+    return message;
+  }
+  return {
+    ...message,
+    params: { ...message.params, update: { ...update, availableCommands: [...update.availableCommands, { ...GOAL_COMMAND, input: { ...GOAL_COMMAND.input } }] } }
+  };
+}
+
 function restore(target, key, wrapper, descriptor) {
   if (target[key] !== wrapper) return;
   if (descriptor) Object.defineProperty(target, key, descriptor);
@@ -116,6 +146,7 @@ function installGoalContinue({ nativeMainPath, isEnabled = () => false, log = ()
   const ambiguousNotified = new Set();
   const owners = new Set();
   let listener = null;
+  let commandHandler = null;
   let disposed = false;
 
   const report = (event, data) => { try { log(event, data); } catch {} };
@@ -194,9 +225,40 @@ function installGoalContinue({ nativeMainPath, isEnabled = () => false, log = ()
       return runGenerations.get(sessionId) || 0;
     }
 
+    function rewriteGoalCommand(request, sessionId) {
+      if (typeof commandHandler !== 'function' || !enabled()) return null;
+      const command = parseGoalCommand(request?.params?.prompt);
+      if (!command) return null;
+      adopt(sessionId);
+      let action = null;
+      try {
+        action = commandHandler({
+          sessionId, action: command.action, text: command.text,
+          ambiguous: sessions.ambiguous(sessionId), connected: sessions.uniqueConnector(sessionId) === connector
+        });
+      } catch { action = null; }
+      if (!action || typeof action.prompt !== 'string' || !action.prompt) return null;
+      report('goal-command', { action: command.action, run: !!action.runId });
+      return {
+        request: { ...request, params: { ...request.params, prompt: [{ type: 'text', text: action.prompt }] } },
+        runId: typeof action.runId === 'string' && action.runId ? action.runId : null
+      };
+    }
+
     entry.sendRequestWrapper = function (...args) {
-      const request = args[0], method = request?.method, sessionId = sessionIdentifier(request?.params?.sessionId);
-      const isGoal = goalRequests.has(request);
+      let request = args[0];
+      const method = request?.method, sessionId = sessionIdentifier(request?.params?.sessionId);
+      let isGoal = goalRequests.has(request);
+      if (!disposed && entry.active && sessionId && method === 'session/prompt' && !isGoal) {
+        const rewritten = rewriteGoalCommand(request, sessionId);
+        if (rewritten) {
+          request = rewritten.request;
+          args = [request, ...args.slice(1)];
+          isGoal = true;
+          clearRun(sessionId);
+          if (rewritten.runId) activeRuns.set(sessionId, rewritten.runId);
+        }
+      }
       if (!disposed && entry.active && sessionId) {
         if (RESET_METHODS.has(method)) {
           clearRun(sessionId);
@@ -243,6 +305,7 @@ function installGoalContinue({ nativeMainPath, isEnabled = () => false, log = ()
             notify(sessionId, 'idle', { runId, stopReason: typeof value?.stopReason === 'string' ? value.stopReason : null });
           } else {
             touch(sessionId, 'idle');
+            if (owners.has(sessionId)) notify(sessionId, 'user-idle');
           }
         }
         return value;
@@ -261,6 +324,9 @@ function installGoalContinue({ nativeMainPath, isEnabled = () => false, log = ()
     };
 
     entry.forwardWrapper = function (...args) {
+      if (!disposed && entry.active && enabled()) {
+        try { args = [withGoalCommand(args[0]), ...args.slice(1)]; } catch {}
+      }
       const result = Reflect.apply(originalForward, this, args);
       try { observeIncoming(args[0]); } catch {}
       return result;
@@ -309,6 +375,8 @@ function installGoalContinue({ nativeMainPath, isEnabled = () => false, log = ()
           if (runId && observedRunning.has(sessionId)) {
             clearRun(sessionId);
             notify(sessionId, 'idle', { runId, stopReason: update.stopReason ?? null });
+          } else if (!runId && owners.has(sessionId)) {
+            notify(sessionId, 'user-idle');
           }
           return;
         }
@@ -484,6 +552,7 @@ function installGoalContinue({ nativeMainPath, isEnabled = () => false, log = ()
     cancel,
     hasActiveGoal,
     setListener(next) { listener = typeof next === 'function' ? next : null; },
+    setCommandHandler(next) { commandHandler = typeof next === 'function' ? next : null; },
     setGoalOwned(sessionId, owned) {
       const clean = sessionIdentifier(sessionId);
       if (!clean) return false;
@@ -504,6 +573,7 @@ function installGoalContinue({ nativeMainPath, isEnabled = () => false, log = ()
       observedRunning.clear();
       ambiguousNotified.clear();
       owners.clear();
+      commandHandler = null;
       if (api[INSTANCE] === handle) delete api[INSTANCE];
     }
   };
@@ -511,4 +581,4 @@ function installGoalContinue({ nativeMainPath, isEnabled = () => false, log = ()
   return handle;
 }
 
-module.exports = { installGoalContinue, createSessionRegistry, SESSION_LIMIT, isEligibleConnector };
+module.exports = { installGoalContinue, createSessionRegistry, parseGoalCommand, withGoalCommand, GOAL_COMMAND, SESSION_LIMIT, isEligibleConnector };

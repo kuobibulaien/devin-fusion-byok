@@ -53,61 +53,35 @@ test('the goal webview renders untrusted values as text and never as markup', ()
   const texts = collect(byId('goals'), node => node.tag === 'pre').map(node => node.textContent).join('\n');
   assert.ok(texts.includes('<img onerror=boom>'));
   assert.ok(texts.includes('<script>bad()</script>'));
-  assert.equal(byId('session').children.length, 3);
-  assert.equal(byId('session').children[0].value, '');
-  assert.equal(byId('session').children[2].disabled, true);
-  assert.equal(byId('session').value, '');
-  assert.match(byId('sessionHint').textContent, /空闲/);
 });
 
-test('session labels use titles, distinguish duplicates and retain IDs across renames', () => {
-  const { byId, receive, posts } = webview();
+test('goal cards label sessions by title, distinguish duplicates and fall back to the id', () => {
+  const { byId, receive } = webview();
   const data = state();
   data.sessions[0].title = '<b>标题</b>';
   data.sessions[1].title = '<b>标题</b>';
-  data.sessions.push({ sessionId: 'fallback', status: 'unknown' });
   receive({ data: { type: 'goal-state', state: data } });
-  const options = byId('session').children;
-  assert.equal(options[1].textContent, '<b>标题</b> · session-idle（空闲）');
-  assert.equal(options[2].textContent, '<b>标题</b> · session-busy（忙）');
-  assert.equal(options[3].textContent, 'fallback（未知）');
-  assert.equal(options[1].title, 'session-idle');
-  assert.equal(options[1].children.length, 0);
-  byId('session').value = 'session-idle';
-  byId('session').listeners.change();
-  data.sessions[0].title = '新标题';
+  assert.ok(collect(byId('goals'), n => n.className === 'goalhead')[0].textContent.includes('<b>标题</b> · session-idle'));
+  data.sessions = [];
   receive({ data: { type: 'goal-state', state: data } });
-  assert.equal(byId('session').value, 'session-idle');
-  assert.equal(byId('session').children[1].textContent, '新标题（空闲）');
-  assert.ok(collect(byId('goals'), n => n.className === 'goalhead')[0].textContent.includes('新标题'));
-  byId('start').onclick();
-  assert.equal(posts.find(m => m.type === 'goal.start').payload.sessionId, 'session-idle');
+  assert.ok(collect(byId('goals'), n => n.className === 'goalhead')[0].textContent.includes('session-idle'));
 });
 
-test('the goal webview requires an explicit session selection before start is enabled', () => {
+test('the goal panel has no session picker or start form and explains the /goal command', () => {
+  const html = goalHtml('nonce');
+  for (const id of ['id="session"', 'id="objective"', 'id="criteria"', 'id="maxRuns"', 'id="start"']) assert.ok(!html.includes(id), id);
+  assert.match(html, /\/goal 要达成的目标/);
+  assert.match(html, /\/goal pause/);
+  assert.ok(!goalScript().includes('goal.start'));
+});
+
+test('criteria identical to the objective are not repeated on the card', () => {
   const { byId, receive } = webview();
-  receive({ data: { type: 'goal-state', state: state() } });
-  assert.equal(byId('start').disabled, true);
-  byId('session').value = 'session-idle';
-  byId('session').listeners.change();
-  assert.equal(byId('start').disabled, false);
-});
-
-test('the goal webview posts an explicit session id and objective payload', () => {
-  const { byId, posts, receive } = webview();
-  receive({ data: { type: 'goal-state', state: state() } });
-  byId('session').value = 'session-idle';
-  byId('session').listeners.change();
-  byId('objective').value = 'ship the feature';
-  byId('criteria').value = 'tests pass';
-  byId('maxRuns').value = '7';
-  byId('start').onclick();
-  const start = posts.find(message => message.type === 'goal.start');
-  assert.ok(start);
-  assert.equal(start.payload.sessionId, 'session-idle');
-  assert.equal(start.payload.objective, 'ship the feature');
-  assert.equal(start.payload.criteria, 'tests pass');
-  assert.equal(start.payload.maxRuns, 7);
+  const data = state();
+  data.goals[0].criteria = data.goals[0].objective;
+  receive({ data: { type: 'goal-state', state: data } });
+  const texts = collect(byId('goals'), node => node.tag === 'pre').map(node => node.textContent).join('\n');
+  assert.ok(!texts.includes('验收标准'));
 });
 
 test('the goal webview surfaces errors, review is labelled as not complete, and accept asks for confirmation', () => {

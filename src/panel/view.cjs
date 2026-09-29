@@ -8,11 +8,44 @@ function escapeAttribute(value) {
   return String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 }
 
-const TABS = [['presets', '预设'], ['models', '模型'], ['usage', '用量'], ['settings', '设置']];
+const TABS = [['presets', '预设'], ['models', '模型'], ['usage', '用量'], ['goal', 'Goal', 'Beta'], ['settings', '设置']];
+
+function goalMarkup() {
+  const code = text => `<code class="cmd">${text}</code>`;
+  const rows = [
+    ['/goal 要达成的目标', '在当前对话启动目标，这条消息就是第一轮。已有目标时会替换旧目标。'],
+    ['/goal', '查看当前目标、状态、已运行轮数和最近进展。'],
+    ['/goal pause', '暂停自动推进。'],
+    ['/goal resume', '继续推进；已到运行上限时再追加 10 轮（总共最多 100 轮）。'],
+    ['/goal clear', '清除当前目标。']
+  ].map(([command, text]) => `<div class="row"><div class="row-main"><span class="row-title">${code(command)}</span><span class="row-sub">${text}</span></div></div>`).join('');
+  return `<div class="goal-doc">
+      <div class="section-head"><h2>Goal <span class="badge beta">Beta</span></h2><button id="open-goal" class="secondary" type="button">查看目标进度</button></div>
+      <p>让模型围绕一个目标一轮轮自动工作，直到它提交带证据的完成报告。在 Devin 聊天框里直接输入命令即可，不需要在这里设置。</p>
+      <h3 class="mt">命令</h3>
+      <div class="list">${rows}</div>
+      <h3 class="mt">怎么写目标</h3>
+      <p>把“怎样算做完”直接写进这句话，最好能用命令或文件验证。例如：${code('/goal 让 test/auth 里的测试全部通过，并保持 lint 干净')}</p>
+      <h3 class="mt">它会怎么运行</h3>
+      <ul>
+        <li>每轮结束前，模型用插件提供的报告命令提交状态：有进展、等待你的输入、受阻，或已完成。</li>
+        <li>提交“有进展”后自动开始下一轮；提交“已完成”并附上证据后，目标自动结束并进入历史。模型只在文字里说“做完了”不算。</li>
+        <li>你在进行中插话，目标会让出这一轮，你这轮结束后自动接着推进；模型等你回答时，你回复后也会自动继续。</li>
+        <li>默认最多 10 轮。遇到权限确认、运行被取消、连续两轮没有报告、连续三轮进展相同、窗口重新加载时会停下，用 ${code('/goal resume')} 继续。</li>
+      </ul>
+      <h3 class="mt">注意</h3>
+      <ul>
+        <li>这是测试版，还在收集真实使用反馈。</li>
+        <li>每一轮都是一次正常的模型调用，会按你的供应商计费。${code('/goal')}、${code('/goal pause')} 等查看和控制命令也会产生一次很短的模型回复。</li>
+        <li>完成报告来自模型本身，关键结果请自己再核对一下。</li>
+      </ul>
+    </div>`;
+}
+
 
 function renderPanel({ nonce, cspSource }) {
   const safeNonce = escapeAttribute(nonce);
-  const tabs = TABS.map(([id, label], index) => `<button id="tab-${id}" class="tab" type="button" role="tab" aria-controls="view-${id}" aria-selected="${index === 0}" data-tab="${id}">${label}</button>`).join('');
+  const tabs = TABS.map(([id, label, tag], index) => `<button id="tab-${id}" class="tab" type="button" role="tab" aria-controls="view-${id}" aria-selected="${index === 0}" data-tab="${id}">${label}${tag ? ` <span class="badge beta">${tag}</span>` : ''}</button>`).join('');
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -77,6 +110,11 @@ function renderPanel({ nonce, cspSource }) {
     button.link-title { display: block; padding: 0; min-height: 0; border: 0; background: transparent; color: inherit; text-align: left; white-space: normal; overflow-wrap: anywhere; }
     button.link-title:hover { background: transparent; text-decoration: underline; }
     .badge { font-size: 11px; padding: 1px 8px; border-radius: 9px; background: var(--accent); color: var(--vscode-button-foreground, #fff); white-space: nowrap; }
+    .badge.beta { background: transparent; color: var(--accent); border: 1px solid var(--accent); font-size: 10px; padding: 0 6px; vertical-align: 1px; }
+    .goal-doc { max-width: 760px; }
+    .goal-doc ul { padding-left: 20px; margin: 6px 0; }
+    .goal-doc li { margin: 4px 0; }
+    code.cmd { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; padding: 1px 5px; border-radius: 4px; background: var(--vscode-textCodeBlock-background, #2b2b2b); overflow-wrap: anywhere; }
     .preset.current { box-shadow: inset 3px 0 0 var(--accent); }
     .plus { color: var(--muted); margin: 0 6px; }
     .empty { padding: 32px 16px; text-align: center; color: var(--muted); }
@@ -157,6 +195,7 @@ function renderPanel({ nonce, cspSource }) {
       </div>
     </section>
     <section id="view-usage" role="tabpanel" aria-labelledby="tab-usage" hidden>${monitorMarkup()}</section>
+    <section id="view-goal" role="tabpanel" aria-labelledby="tab-goal" hidden>${goalMarkup()}</section>
     <section id="view-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
       <div id="settings-general"></div>
       <details id="role-group" class="group"><summary>预设可选模型<span id="role-count" class="hint"></span></summary><div class="group-body"><p class="hint mb">新建预设时，下拉框只列出这里打开的模型。</p><div class="role-grid"><div id="role-lead"></div><div id="role-sidekick"></div></div></div></details>
@@ -176,7 +215,7 @@ function panelClient(modelSupportsImages, vscode, normalizeBaseUrlPath) {
   const byId = id => document.getElementById(id);
   const pending = new Map();
   const saved = vscode.getState() || {};
-  const TAB_IDS = ['presets', 'models', 'usage', 'settings'];
+  const TAB_IDS = ['presets', 'models', 'usage', 'goal', 'settings'];
   let serial = 0;
   let state;
   let busy = false;
@@ -742,6 +781,9 @@ function panelClient(modelSupportsImages, vscode, normalizeBaseUrlPath) {
     setEnabled(value).then(ok => { if (!ok) event.target.checked = !value; });
   });
   byId('enable-now').addEventListener('click', () => setEnabled(true));
+  byId('open-goal').addEventListener('click', () => {
+    request('goal.open').catch(error => notice(error.message || '无法打开目标进度。', 'error'));
+  });
   byId('restart-devin').addEventListener('click', async () => {
     if (busy) return;
     try {

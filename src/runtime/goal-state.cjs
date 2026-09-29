@@ -1,7 +1,7 @@
 'use strict';
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { goalPrompt } = require('./goal-prompts.cjs');
+const { goalPrompt, commandReplyPrompt } = require('./goal-prompts.cjs');
 const store = require('./goal-store.cjs');
 
 const NEXT_RUN_DELAY_MS = 1500;
@@ -9,6 +9,12 @@ const MISSING_REPORT_LIMIT = 2;
 const REPEAT_EVIDENCE_LIMIT = 3;
 const CONTINUE_STOP_REASON = 'end_turn';
 const SESSION_STATUSES = ['idle', 'busy', 'unknown'];
+const AUTO_RESUME_STATUSES = ['waiting', 'blocked'];
+const AUTO_RESUME_REASONS = ['manual-prompt', 'session-busy', 'session-not-idle'];
+const STATUS_TEXT = {
+  active: '进行中', retrying: '等待重试', paused: '已暂停', waiting: '等待你的输入', blocked: '受阻',
+  limited: '已达运行上限', review: '待验收', completed: '已完成'
+};
 
 function shellQuote(value) {
   return "'" + String(value).replace(/'/g, "'\\''") + "'";
@@ -148,6 +154,24 @@ function createGoalController({
     try { Promise.resolve(transport.cancel(record.sessionId)).catch(() => {}); } catch {}
   }
 
+  function prepareRun(record) {
+    const runId = crypto.randomUUID();
+    const next = {
+      ...record, revision: record.revision + 1, activeRun: runId,
+      runsStarted: record.runsStarted + 1, reason: null
+    };
+    if (!persist(next)) return { record: pauseGoal({ ...record, activeRun: null, revision: record.revision }, 'store-write-failed') };
+
+    let token;
+    try { token = store.issueCapability(root, { id: next.id, revision: next.revision, run: runId, sessionId: next.sessionId }); }
+    catch (error) {
+      storeError = error.message;
+      return { record: pauseGoal(next, 'capability-failed') };
+    }
+    const prompt = goalPrompt({ goal: next, reportCommand: reportCommandFor({ execPath, reportCliPath, storeRoot: root, token }) });
+    return { next, runId, prompt };
+  }
+
   function dispatch(record) {
     if (disposed) return record;
     if (!isEnabled() || !isTrusted()) return pauseGoal(record, 'disabled');
@@ -166,24 +190,14 @@ function createGoalController({
     const session = statusOfSession(record.sessionId);
     if (session !== 'idle') return pauseGoal(record, session === 'busy' ? 'session-busy' : 'session-unavailable');
 
-    const runId = crypto.randomUUID();
-    const next = {
-      ...record, revision: record.revision + 1, activeRun: runId,
-      runsStarted: record.runsStarted + 1, reason: null
-    };
-    if (!persist(next)) return pauseGoal({ ...record, activeRun: null, revision: record.revision }, 'store-write-failed');
-
-    let token;
-    try { token = store.issueCapability(root, { id: next.id, revision: next.revision, run: runId, sessionId: next.sessionId }); }
-    catch (error) {
-      storeError = error.message;
-      return pauseGoal(next, 'capability-failed');
-    }
-    const prompt = goalPrompt({ goal: next, reportCommand: reportCommandFor({ execPath, reportCliPath, storeRoot: root, token }) });
+    const prepared = prepareRun(record);
+    if (!prepared.runId) return prepared.record;
+    const { next, runId, prompt } = prepared;
     const captured = bumpGeneration(next.id);
     inFlight.add(next.id);
     report('goal-run-dispatched', { runsStarted: next.runsStarted, revision: next.revision });
     Promise.resolve()
+
       .then(() => {
         if (disposed || generation.get(next.id) !== captured) return null;
         const current = readById(next.id);
@@ -253,6 +267,12 @@ function createGoalController({
     }].slice(-store.MAX_EVIDENCE_ENTRIES);
     record.missingRuns = 0;
     invalidateRun(record);
+    if (submitted.status === 'complete') {
+      record.status = 'completed'; record.reason = 'achieved';
+      try { archiveRecord(record); } catch { persist(record); }
+      report('goal-completed', { runsStarted: record.runsStarted });
+      return record;
+    }
     if (submitted.status === 'review') { record.status = 'review'; record.reason = 'review'; persist(record); return record; }
     if (submitted.status === 'waiting' || submitted.status === 'blocked') {
       record.status = submitted.status; record.reason = submitted.status; persist(record); return record;
@@ -330,10 +350,163 @@ function createGoalController({
     invalidateRun(record);
     pauseGoal(record, reason || 'interrupted');
   }
+  function archiveRecord(record) {
+    const running = inFlight.has(record.id);
+    cancelTimer(record.id);
+    inFlight.delete(record.id);
+    bumpGeneration(record.id);
+    invalidateRun(record);
+    if (record.status === 'active' || record.status === 'retrying') record.status = 'paused';
+    record.retryWindow = null;
+    const archivedAt = now();
+    try {
+      store.archiveGoal(root, { ...record, archivedAt, updatedAt: archivedAt });
+    } catch (error) {
+      storeError = error.message;
+      throw goalError('store-write-failed', '归档记录写入失败。');
+    } finally {
+      stopOwnedRun(record, running);
+    }
+    record.archivedAt = archivedAt;
+    mirror(record.sessionId, false);
+    store.releaseOwnership(root, record.sessionId, { owner: cleanOwner });
+    return { ...record, archived: true };
+  }
+  function handleUserIdle(sessionId) {
+    const record = ownedRecords().find(goal => goal.sessionId === sessionId);
+    if (!record || record.activeRun !== null) return;
+    const resumable = AUTO_RESUME_STATUSES.includes(record.status) ||
+      (record.status === 'paused' && AUTO_RESUME_REASONS.includes(record.reason));
+    if (!resumable || record.runsStarted >= record.maxRuns) return;
+    if (!isEnabled() || !isTrusted()) return;
+    const from = record.status;
+    record.status = 'active';
+    record.reason = null;
+    record.repeatCount = 0;
+    record.missingRuns = 0;
+    if (!persist(record)) return;
+    report('goal-auto-resumed', { from });
+    scheduleNext(record);
+  }
+
+  function sessionGoal(sessionId) {
+    const listed = scan();
+    return listed.goals.find(record => record.sessionId === sessionId && record.archivedAt === null) || null;
+  }
+  function lastArchived(sessionId) {
+    return scan().history.filter(record => record.sessionId === sessionId)
+      .sort((a, b) => (b.archivedAt || 0) - (a.archivedAt || 0))[0] || null;
+  }
+  function describe(record) {
+    const lines = ['目标：' + record.objective, '状态：' + (STATUS_TEXT[record.status] || record.status) +
+      (record.reason ? '（' + record.reason + '）' : ''), '已运行：' + record.runsStarted + ' / ' + record.maxRuns + ' 次'];
+    const last = record.evidence[record.evidence.length - 1];
+    if (last) lines.push('最近进展：' + last.evidence);
+    return lines.join('\n');
+  }
+  function reply(text) { return { prompt: commandReplyPrompt(text) }; }
+  function beginRun(record) {
+    const prepared = prepareRun(record);
+    if (!prepared.runId) throw goalError('dispatch-failed', '目标状态写入失败，没有开始运行。');
+    bumpGeneration(prepared.next.id);
+    inFlight.add(prepared.next.id);
+    report('goal-run-dispatched', { runsStarted: prepared.next.runsStarted, revision: prepared.next.revision, command: true });
+    return { prompt: prepared.prompt, runId: prepared.runId };
+  }
+  function commandStart(clean, text) {
+    const objectiveText = store.normalizeObjective(text);
+    if (!objectiveText) throw goalError('invalid-objective', '目标描述必须是 1 到 ' + store.MAX_OBJECTIVE_LENGTH + ' 字符的文本。');
+    const existing = sessionGoal(clean);
+    if (existing) {
+      const ownership = ownershipOf(clean);
+      if (ownership && (ownership.corrupt || ownership.ownerId !== cleanOwner)) {
+        throw goalError('not-owner', '这个对话的目标正由另一个窗口管理，本窗口不接管。');
+      }
+      archiveRecord(reclaim(existing));
+    }
+    startable(clean);
+    acquire(clean);
+    startable(clean);
+    const timestamp = now();
+    const record = {
+      schemaVersion: store.SCHEMA_VERSION, id: crypto.randomBytes(16).toString('hex'), sessionId: clean,
+      revision: 1, objective: objectiveText, criteria: objectiveText, status: 'active', runsStarted: 0,
+      maxRuns: store.DEFAULT_MAX_RUNS, activeRun: null, reason: null, evidence: [], missingRuns: 0,
+      retryPolicy: store.normalizeRetryPolicy(undefined), retryWindow: null,
+      lastEvidence: null, repeatCount: 0, createdAt: timestamp, updatedAt: timestamp, archivedAt: null
+    };
+    try { store.writeGoal(root, record); }
+    catch (error) {
+      storeError = error.message;
+      store.releaseOwnership(root, clean, { owner: cleanOwner });
+      throw goalError('store-write-failed', '目标状态写入失败。');
+    }
+    mirror(clean, true);
+    report('goal-command-started', {});
+    return beginRun(readById(record.id) || record);
+  }
+  function commandResume(record) {
+    const current = reclaim(record);
+    requireOwnership(current);
+    if (current.status === 'active') throw goalError('already-active', '目标已经在运行。');
+    if (current.status === 'completed') throw goalError('completed', '目标已经完成。');
+    if (current.runsStarted >= current.maxRuns) {
+      current.maxRuns = Math.min(store.MAX_RUNS, current.runsStarted + store.DEFAULT_MAX_RUNS);
+      if (current.runsStarted >= current.maxRuns) throw goalError('exhausted', '已达最多 ' + store.MAX_RUNS + ' 次运行，不能继续。');
+    }
+    cancelTimer(current.id);
+    current.status = 'active';
+    current.reason = null;
+    current.repeatCount = 0;
+    current.missingRuns = 0;
+    current.retryWindow = null;
+    if (!persist(current)) throw goalError('store-write-failed', '目标状态写入失败。');
+    mirror(current.sessionId, true);
+    return beginRun(readById(current.id) || current);
+  }
+  function handleCommand({ sessionId, action, text, ambiguous, connected } = {}) {
+    const clean = store.identifier(sessionId);
+    if (!clean) return null;
+    try {
+      if (action === 'status') {
+        const record = sessionGoal(clean);
+        if (record) return reply(describe(record));
+        const previous = lastArchived(clean);
+        return reply('这个对话当前没有目标。用法：/goal 要达成的目标' +
+          (previous ? '\n\n上一个目标：' + previous.objective + '（' + (STATUS_TEXT[previous.status] || previous.status) + '）' : ''));
+      }
+      if (action === 'pause') {
+        const record = sessionGoal(clean);
+        if (!record) return reply('这个对话当前没有目标。');
+        handle.pause({ id: record.id });
+        return reply('目标已暂停。输入 /goal resume 继续。');
+      }
+      if (action === 'clear') {
+        const record = sessionGoal(clean);
+        if (!record) return reply('这个对话当前没有目标。');
+        archiveRecord(reclaim(record));
+        return reply('目标已清除：' + record.objective);
+      }
+      requireBoundary();
+      if (ambiguous || connected === false) throw goalError('ambiguous-session', '这个对话同时连在多个窗口上，无法确定归属，请只在一个窗口里打开它。');
+      if (action === 'resume') {
+        const record = sessionGoal(clean);
+        if (!record) return reply('这个对话当前没有目标。用法：/goal 要达成的目标');
+        return commandResume(record);
+      }
+      if (action === 'start') return commandStart(clean, text);
+      return null;
+    } catch (error) {
+      if (error?.code) return reply('/goal 没有执行：' + error.message);
+      return reply('/goal 没有执行：发生了意外错误。');
+    }
+  }
+
   function onEvent(event) {
     if (disposed || !event || typeof event.type !== 'string') return;
     try {
       if (event.type === 'idle') handleRunEnd(event.sessionId, event.runId, event.stopReason);
+      else if (event.type === 'user-idle') handleUserIdle(event.sessionId);
       else if (event.type === 'interrupted') handleStop(event.sessionId, event.reason);
       else if (event.type === 'user-prompt') handleStop(event.sessionId, 'manual-prompt');
       else if (event.type === 'disconnect') handleStop(event.sessionId, 'disconnected');
@@ -389,6 +562,7 @@ function createGoalController({
 
   const handle = {
     ownsSession,
+    handleCommand,
     sessionStatus: statusOfSession,
     snapshot() {
       const listed = scan();
@@ -525,25 +699,7 @@ function createGoalController({
       if (found.archivedAt !== null) throw goalError('archived', '该目标已经归档。');
       const record = reclaim(found);
       if (record.archivedAt !== null) throw goalError('archived', '该目标已经归档。');
-      const running = inFlight.has(record.id);
-      cancelTimer(record.id);
-      inFlight.delete(record.id);
-      bumpGeneration(record.id);
-      invalidateRun(record);
-      if (record.status === 'active') record.status = 'paused';
-      const archivedAt = now();
-      try {
-        store.archiveGoal(root, { ...record, archivedAt, updatedAt: archivedAt });
-      } catch (error) {
-        storeError = error.message;
-        throw goalError('store-write-failed', '归档记录写入失败。');
-      } finally {
-        stopOwnedRun(record, running);
-      }
-      record.archivedAt = archivedAt;
-      mirror(record.sessionId, false);
-      store.releaseOwnership(root, record.sessionId, { owner: cleanOwner });
-      return { ...record, archived: true };
+      return archiveRecord(record);
     },
     dispose() {
       if (disposed) return;
@@ -562,6 +718,7 @@ function createGoalController({
   restore();
   for (const record of ownedRecords()) if (record.archivedAt === null) mirror(record.sessionId, true);
   try { transport.setListener?.(onEvent); } catch {}
+  try { transport.setCommandHandler?.(handleCommand); } catch {}
   return handle;
 }
 

@@ -48,6 +48,11 @@ function createPanelController({ vscode, context, manager, safeError, updater, r
           await current.webview.postMessage({ type: 'result', id: message.id, ok: true, cancelled: choice !== '重启' });
           return;
         }
+        if (message.type === 'goal.open') {
+          await vscode.commands.executeCommand('devinFusionByok.goal');
+          await current.webview.postMessage({ type: 'result', id: message.id, ok: true });
+          return;
+        }
         if (message.type.startsWith('update.') && updater) {
           if (message.type === 'update.check') await updater.check({ force: true });
           else if (message.type === 'update.install') await updater.installUpdate();
