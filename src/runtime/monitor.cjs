@@ -139,7 +139,10 @@ function summarize(records) {
   return result;
 }
 const quote = value => "'" + value.replace(/'/g, "''") + "'";
+const safeId = value => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,256}$/.test(value);
 async function sessionMatches(databasePath, ids, toolIds = []) {
+  ids = ids.filter(safeId);
+  toolIds = toolIds.filter(safeId);
   if (!ids.length && !toolIds.length) return [];
   const values = ids.map(quote).join(',') || "''";
   const tools = toolIds.map(quote).join(',') || "''";
