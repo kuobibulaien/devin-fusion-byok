@@ -115,25 +115,19 @@ test('legacy default migration is exact, idempotent and does not recreate explic
 });
 
 test('installed picker keeps each named preset independently selectable and featured', () => {
-  const fs = require('node:fs'), vm = require('node:vm');
-  const file = '/Applications/Devin.app/Contents/Resources/app/out/vs/workbench/windsurf-chat-client/index.js';
-  if (!fs.existsSync(file)) return;
-  const source = fs.readFileSync(file, 'utf8');
-  const start = source.indexOf('function nrP('), end = source.indexOf('let nr$=', start);
-  assert.ok(start >= 0 && end > start);
-  const picker = vm.runInNewContext(source.slice(start, end) + ';({nrP,nrz,nrV})');
+  const { available, loadFamilyPicker, loadGroupSorter } = require('./support/installed-renderer.cjs');
+  if (!available) return;
+  const picker = loadFamilyPicker();
   const input = config(); input.fusionPresets = [preset(), preset('two', '排查')];
   const catalog = buildCatalog(input);
   const models = catalog.models.filter(model => model.kind === 'fusion').map(model => ({
     modelUid: model.uid, label: model.label, disabled: false, familyUid: model.json.modelInfo.modelFamilyUid,
     familyMetadata: Object.fromEntries(model.json.modelFamilyMetadata.entries.map(entry => [entry.key, entry.value])),
   }));
-  const rows = picker.nrV(picker.nrz(models), [], undefined, false);
+  const rows = picker.rows(models);
   assert.deepEqual(Array.from(rows, row => row.model.modelUid), models.map(model => model.modelUid));
   assert.ok(rows.every(row => row.family.models.length === 1 && row.family.dimensions.length === 0));
-  const groupStart = source.indexOf('function nc3('), groupEnd = source.indexOf('function nc8(', groupStart);
-  assert.ok(groupStart >= 0 && groupEnd > groupStart);
-  const groups = vm.runInNewContext(source.slice(groupStart, groupEnd) + ';nc3', { lP: { MODEL_ROUTER: 3 } });
+  const groups = loadGroupSorter();
   const sorted = groups([{ name: 'Recommended', groups: [{ groupName: '我的 Fusion', options: catalog.models.slice(0, 2).map(model => model.json) }] }], item => item);
   assert.equal(sorted[0].groups[0].isFeatured, true);
 });

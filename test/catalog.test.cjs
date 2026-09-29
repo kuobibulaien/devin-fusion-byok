@@ -3,7 +3,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const vm = require('node:vm');
 const { buildCatalog: buildSavedCatalog, augmentCatalog, resolveAssignment, collectNativeModels } = require('../src/catalog.cjs');
 const { withPresets } = require('./fixtures/presets.cjs');
 const buildCatalog = (config = {}, natives = []) => buildSavedCatalog(withPresets(config, natives), natives);
@@ -400,12 +399,9 @@ for (const format of [proto, json]) test(`${format.json ? 'JSON' : 'protobuf'} a
 
 // Integration evidence from the installed native picker. Portable test runs skip
 // these checks when Devin is absent; catalog production code never imports it.
-const rendererFile = '/Applications/Devin.app/Contents/Resources/app/out/vs/workbench/windsurf-chat-client/index.js';
+const { rendererFile, loadFamilyPicker, loadAcpPicker } = require('./support/installed-renderer.cjs');
 test('installed native Fusion grouping includes every custom Lead and both available Sidekicks', { skip: !fs.existsSync(rendererFile) }, () => {
-  const source = fs.readFileSync(rendererFile, 'utf8');
-  const start = source.indexOf('function nrP('), end = source.indexOf('let nr$=', start);
-  assert.ok(start >= 0 && end > start, 'native family picker extraction anchors');
-  const renderer = vm.runInNewContext(source.slice(start, end) + ';({nrP,nrz,nrV})');
+  const renderer = loadFamilyPicker();
   const models = catalog.models.filter(model => model.kind === 'fusion').map(model => ({
     modelUid: model.uid, label: model.label, disabled: false, familyUid: model.json.modelInfo.modelFamilyUid,
     familyMetadata: Object.fromEntries(model.json.modelFamilyMetadata.entries.map(entry => [entry.key, entry.value])),
@@ -415,25 +411,19 @@ test('installed native Fusion grouping includes every custom Lead and both avail
     Sidekick: { order: 1, name: 'SWE-2 Medium' }, 'Fast Mode': { order: 0, name: '' },
     'Recommended Sidekick': { order: 0, name: 'SWE-2 Medium' },
   } };
-  const rows = renderer.nrV(renderer.nrz([official, ...models]), [], undefined, false);
+  const rows = renderer.rows([official, ...models]);
   assert.equal(rows.length, models.length + 1);
   assert.deepEqual(Array.from(rows.slice(1), row => row.model.modelUid), models.map(model => model.modelUid));
   assert.ok(rows.slice(1).every(row => row.family.models.length === 1));
 });
 
 test('installed ACP picker requires own UIDs in session config_options as well as the user status catalog', { skip: !fs.existsSync(rendererFile) }, () => {
-  const source = fs.readFileSync(rendererFile, 'utf8');
-  const start = source.indexOf('function nqj('), end = source.indexOf('nqU.displayName=', start);
-  assert.ok(start >= 0 && end > start, 'native ACP option extraction anchors');
-  const renderer = vm.runInNewContext(source.slice(start, end) + ';({nqj:nqJ})');
-  const filter = source.match(/let e=nqJ\(_\.options\);return k\.filter\(t=>e\.has\(t\.modelUid\)\|\|t\.disabled\)/)?.[0];
-  assert.ok(filter, 'native session/catalog intersection still matches audited code');
-  const select = new Function('nqJ', '_', 'k', filter);
+  const acp = loadAcpPicker();
   const models = catalog.models.map(model => ({ modelUid: model.uid, disabled: false }));
   const oldSession = { options: [{ value: 'fusion-official', name: 'Official' }] };
-  assert.equal(select(renderer.nqj, oldSession, models).length, 0);
+  assert.equal(acp.filter(oldSession, models).length, 0);
   const updatedSession = { options: [{ group: 'BYOK', options: models.map(model => ({ value: model.modelUid, name: model.modelUid })) }] };
-  assert.equal(select(renderer.nqj, updatedSession, models).length, catalog.models.length);
+  assert.equal(acp.filter(updatedSession, models).length, catalog.models.length);
 });
 
 test('hidden official uids are removed from proto lists while observation still reports them', () => {
@@ -872,10 +862,7 @@ test('sanitized real catalog entries yield canonical orders and exact harnesses 
 });
 
 test('the installed picker selects every canonical native Sidekick on generated combinations', { skip: !fs.existsSync(rendererFile) }, () => {
-  const source = fs.readFileSync(rendererFile, 'utf8');
-  const start = source.indexOf('function nrP('), end = source.indexOf('let nr$=', start);
-  assert.ok(start >= 0 && end > start, 'native picker anchors');
-  const picker = vm.runInNewContext(source.slice(start, end) + ';({nrP,nrz,nrV})');
+  const picker = loadFamilyPicker();
   const fixture = JSON.parse(fs.readFileSync(__dirname + '/fixtures/real-picker-0.3.11.json', 'utf8'));
   const protoFamily = family => m(30, cat(s(1, 'Fusion'), ...(family || []).map(dim =>
     m(2, cat(s(1, dim.key), m(2, cat(v(1, dim.order), s(2, dim.name), v(3, dim.controlType ?? 0))))))));
@@ -889,7 +876,7 @@ test('the installed picker selects every canonical native Sidekick on generated 
   const officialModel = record => ({ modelUid: record.uid, label: record.label, disabled: !!record.disabled, familyUid: 'fusion',
     familyMetadata: Object.fromEntries((record.family || []).map(dim => [dim.key, { order: dim.order, name: dim.name }])) });
   const models = [...fixture.fusions.map(officialModel), ...result.models.filter(model => model.kind === 'fusion').map(pickerModel)];
-  const rows = picker.nrV(picker.nrz(models), [], undefined, false);
+  const rows = picker.rows(models);
   for (const uid of ['swe-2-medium', 'swe-2-high', 'gpt-5-6-luna-high', 'gpt-5-6-sol-high', 'glm-5-2']) {
     const row = rows.find(row => result.fusions[row.model.modelUid]?.sidekickUid === uid);
     assert.ok(row && !row.model.disabled, uid + ' saved preset is selectable');

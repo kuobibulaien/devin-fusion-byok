@@ -3,13 +3,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
-const vm = require('node:vm');
 const { modelEfforts } = require('../src/model-capabilities.cjs');
 const { buildCatalog, resolveAssignment } = require('../src/catalog.cjs');
 const { buildRequestBody } = require('../src/protocol/responses.cjs');
 const { withPresets } = require('./fixtures/presets.cjs');
 const { createManager } = require('../src/panel/model.cjs');
-const rendererFile = '/Applications/Devin.app/Contents/Resources/app/out/vs/workbench/windsurf-chat-client/index.js';
+const { rendererFile, loadFamilyPicker } = require('./support/installed-renderer.cjs');
 const config = () => ({ providers: [{ id: 'load', name: 'load', apiFormat: 'openai-responses', models:
   ['gpt-6-astra', 'swe-2-high', 'swe-2-max', 'swe-2-medium'].map(id => ({ id, efforts: [] })) }],
   sidekicks: [{ providerId: 'load', model: 'swe-2-max' }, { nativeUid: 'swe-2-max' }] });
@@ -74,14 +73,11 @@ test('selected native Fusion effort resolves to the actual Responses and Chat AP
 });
 
 test('actual installed Fusion picker enables every GPT effort and imported Sidekick', { skip: !fs.existsSync(rendererFile) }, () => {
-  const source = fs.readFileSync(rendererFile, 'utf8');
-  const start = source.indexOf('function nrP('), end = source.indexOf('let nr$=', start);
-  assert.ok(start >= 0 && end > start);
-  const native = vm.runInNewContext(source.slice(start, end) + ';({nrz,nrV})');
+  const native = loadFamilyPicker();
   const catalog = buildCatalog(withPresets(config(), OBSERVED_SWE), OBSERVED_SWE);
   const models = catalog.models.filter(m => m.kind === 'fusion').map(m => ({ modelUid: m.uid, disabled: false, familyUid: m.json.modelInfo.modelFamilyUid,
     familyMetadata: Object.fromEntries(m.json.modelFamilyMetadata.entries.map(e => [e.key, e.value])) }));
-  const rows = native.nrV(native.nrz(models), [], undefined, false);
+  const rows = native.rows(models);
   assert.equal(rows.length, Object.keys(catalog.fusions).length);
   for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) assert.ok(rows.some(row => catalog.routes[catalog.fusions[row.model.modelUid].leadUid].effort === effort));
 });

@@ -13,6 +13,7 @@ const { readReceipt, remember, saveReceipt, valueAt, restoreObject, permitted } 
 const { readNativeModels } = require('./runtime/native-models.cjs');
 const { installAutoContinue } = require('./runtime/auto-continue.cjs');
 const { installGoalContinue } = require('./runtime/goal-continue.cjs');
+const { createPickerRefresh } = require('./runtime/picker-refresh.cjs');
 const { createGoalController } = require('./runtime/goal-state.cjs');
 let stopNativeSync;
 let stopAutoContinue;
@@ -426,6 +427,11 @@ async function activate(context) {
     statusBar.text = 'Fusion BYOK'; statusBar.tooltip = '管理供应商、模型列表与 Fusion 组合';
     statusBar.command = 'devinFusionByok.openPanel'; statusBar.show(); context.subscriptions.push(statusBar);
   }
+  const pickerRefresh = createPickerRefresh({ log,
+    executeCommand: command => vscode.commands.executeCommand(command),
+    readModels: () => catalog().models });
+  pickerRefresh.prime();
+  context.subscriptions.push(pickerRefresh);
   manager = createManager({ read: config, write: current => writeConfig(configFile, current),
     nativeModels: () => [...nativeModels.values()], refreshNativeModels, nativeCatalogStatus: () => nativeCatalogStatus,
     autoContinueStatus: () => autoContinue ? (autoContinue.status().connections > 0 ? 'attached' : 'waiting') : 'unavailable',
@@ -439,6 +445,7 @@ async function activate(context) {
       if (type === 'setEnabled' && config().enabled === false) await disable();
       else if (type === 'setAutoContinue' || type === 'setAutoContinueUntilPlanComplete') resetAutoContinue?.();
       else if (config().enabled !== false) { await ensureEnabled(); await reconcileSelection(); }
+      pickerRefresh.changed();
     } });
   const updater = require('./update.cjs').createUpdateHost({ vscode, context,
     onChange: () => management?.publishUpdates?.() });
