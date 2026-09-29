@@ -23,15 +23,33 @@ function importLegacy() {
   } catch { return { enabled: true, providers: [], sidekicks: [], roleExclusions: { lead: [], sidekick: [] } }; }
 }
 async function discover(provider) {
-  const url = new URL(provider.baseUrl.replace(/\/$/, '') + '/models');
-  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('API 地址必须以 http:// 或 https:// 开头');
-  const response = await fetch(url, { headers: { Authorization: 'Bearer ' + provider.apiKey }, signal: AbortSignal.timeout(20000) });
-  if (!response.ok) throw new Error('获取模型失败：HTTP ' + response.status);
-  const json = await response.json();
-  if (!Array.isArray(json.data)) throw new Error('API 未返回模型列表');
+  const anthropic = provider.apiFormat === 'anthropic';
+  const headers = anthropic ? { 'anthropic-version': '2023-06-01', 'x-api-key': provider.apiKey } : { Authorization: 'Bearer ' + provider.apiKey };
+  const listed = [];
+  let after = null;
+  // Anthropic's /models is paginated; OpenAI-compatible providers return a single page.
+  for (let page = 0; page < 20; page++) {
+    const url = new URL(provider.baseUrl.replace(/\/$/, '') + '/models');
+    if (!['http:', 'https:'].includes(url.protocol)) throw new Error('API 地址必须以 http:// 或 https:// 开头');
+    if (anthropic) { url.searchParams.set('limit', '1000'); if (after) url.searchParams.set('after_id', after); }
+    const response = await fetch(url, { headers, signal: AbortSignal.timeout(20000) });
+    if (!response.ok) throw new Error('获取模型失败：HTTP ' + response.status);
+    const json = await response.json();
+    if (!Array.isArray(json.data)) throw new Error('API 未返回模型列表');
+    listed.push(...json.data);
+    if (!anthropic || !json.has_more || typeof json.last_id !== 'string' || json.last_id === after) break;
+    after = json.last_id;
+  }
   const old = new Map(provider.models.map(m => [m.id, m]));
-  provider.models = [...new Set(json.data.map(m => m.id).filter(id => typeof id === 'string' && id.length <= 256))].map(id =>
-    old.get(id) || { id, label: provider.name + ' · ' + id, efforts: [], contextWindow: 272000, maxOutputTokens: 131072 });
+  const limits = new Map(listed.filter(m => m && typeof m.id === 'string').map(m => [m.id, m]));
+  const positive = value => Number.isSafeInteger(value) && value > 0 ? value : null;
+  provider.models = [...new Set(listed.map(m => m?.id).filter(id => typeof id === 'string' && id.length <= 256))].map(id => {
+    if (old.has(id)) return old.get(id);
+    const info = limits.get(id);
+    const contextWindow = positive(info.max_input_tokens) ?? 272000;
+    const maxOutputTokens = Math.min(positive(info.max_tokens) ?? 131072, contextWindow);
+    return { id, label: provider.name + ' · ' + id, efforts: [], contextWindow, maxOutputTokens };
+  });
   return provider.models.length;
 }
 function updateSidekicks(config) {

@@ -4,17 +4,20 @@ const { randomUUID } = require('node:crypto');
 const { frame } = require('./wire.cjs');
 const { textChunk, thinkingChunk, toolChunk, stopChunk, usageChunk } = require('./chat.cjs');
 const { createTracker } = require('../runtime/monitor.cjs');
+const { isAnthropicFormat, anthropicHeaders, buildAnthropicBody, createAnthropicAdapter } = require('./anthropic.cjs');
 const MAX_SSE_BUFFER = 64 * 1024 * 1024;
 
 function isChatFormat(format = '') { return /chat[-_\/]?completions|^(?:chat|openai)$/.test(format); }
 function endpoint(provider) {
   const url = new URL(provider.baseUrl);
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Invalid provider URL');
-  const chat = isChatFormat(provider.apiFormat);
-  url.pathname = url.pathname.replace(/\/(responses|chat\/completions)\/?$/, '').replace(/\/$/, '') + (chat ? '/chat/completions' : '/responses');
+  const anthropic = isAnthropicFormat(provider.apiFormat);
+  const chat = anthropic || isChatFormat(provider.apiFormat);
+  url.pathname = url.pathname.replace(/\/(responses|chat\/completions|messages)\/?$/, '').replace(/\/$/, '') +
+    (anthropic ? '/messages' : chat ? '/chat/completions' : '/responses');
   url.search = '';
   url.hash = '';
-  return { url, chat };
+  return { url, chat, anthropic };
 }
 
 function contentOf(message, chat) {
@@ -30,6 +33,7 @@ function contentOf(message, chat) {
 }
 
 function buildRequestBody(request, route, provider) {
+  if (isAnthropicFormat(provider.apiFormat)) return buildAnthropicBody(request, route, provider);
   const chat = isChatFormat(provider.apiFormat);
   const messages = [];
   if (request.systemPrompt !== '') messages.push({ role: chat ? 'system' : 'developer', content: request.systemPrompt });
@@ -304,7 +308,7 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
   };
 
   try {
-    const { url, chat } = endpoint(provider);
+    const { url, chat, anthropic } = endpoint(provider);
     const body = buildRequestBody(request, route, provider);
 
     armTimer(firstResponseLimit, 'upstream_timeout');
@@ -313,7 +317,7 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
       headers: {
         'content-type': 'application/json',
         accept: 'text/event-stream',
-        ...(provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {})
+        ...(anthropic ? anthropicHeaders(provider.apiKey) : provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {})
       },
       body: JSON.stringify(body),
       signal: upstreamController.signal
@@ -357,10 +361,13 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
 
     const stream = processor(id, route.uid || request.modelUid, chat, write);
     try {
-      for await (const event of events(rawChunksWithTimeout(upstream.body))) {
-        metrics.event(event, chat);
-        await stream.event(event);
-        if (event.type === 'done' || (!chat && stream.terminal)) break;
+      const adapt = anthropic ? createAnthropicAdapter() : event => [event];
+      upstream: for await (const raw of events(rawChunksWithTimeout(upstream.body))) {
+        for (const event of adapt(raw)) {
+          metrics.event(event, chat);
+          await stream.event(event);
+          if (event.type === 'done' || (!chat && stream.terminal)) break upstream;
+        }
       }
     } catch (err) {
       if (classifiedCode !== 'upstream_timeout') {

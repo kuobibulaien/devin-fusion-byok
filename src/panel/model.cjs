@@ -3,6 +3,7 @@ const { randomUUID } = require('node:crypto');
 const { buildCatalog, buildRoleLists, refKey, presetUid, normalizeFusionConfig } = require('../catalog.cjs');
 const { discover: discoverModels } = require('../config.cjs');
 const { modelSupportsImages } = require('../model-capabilities.cjs');
+const { normalizeBaseUrlPath } = require('./base-url.cjs');
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
 class PanelInputError extends Error {}
 const fail = message => { throw new PanelInputError(message); };
@@ -13,7 +14,7 @@ function text(value, label, maximum = 256) {
 function baseUrl(value) {
   let url; try { url = new URL(text(value, 'API 地址', 2048)); } catch { fail('请填写完整的 http:// 或 https:// API 地址。'); }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) fail('API 地址不能包含登录信息、查询参数或片段。');
-  url.pathname = url.pathname.replace(/\/(responses|chat\/completions)\/?$/, '').replace(/\/$/, '');
+  url.pathname = normalizeBaseUrlPath(url.pathname);
   return url.toString().replace(/\/$/, '');
 }
 function boolean(value, label) { if (typeof value !== 'boolean') fail(label + '无效。'); return value; }
@@ -143,7 +144,7 @@ function createManager({ read, write, discover = discoverModels, afterChange = a
       case 'saveProvider': {
         const existing = payload.id ? providerAt(config, payload.id) : null;
         const name = text(payload.name, '供应商名称', 80), url = baseUrl(payload.baseUrl);
-        if (!['openai-responses', 'openai'].includes(payload.apiFormat)) fail('请选择 Responses 或 Chat Completions。');
+        if (!['openai-responses', 'openai', 'anthropic'].includes(payload.apiFormat)) fail('请选择 API 类型。');
         if (own(payload, 'apiKey') && (typeof payload.apiKey !== 'string' || payload.apiKey.length > 8192 || /[\r\n]/.test(payload.apiKey))) fail('API Key 无效。');
         const apiKey = payload.apiKey?.trim() || existing?.apiKey || '';
         if (existing) {

@@ -30,20 +30,24 @@ test('monitor browser script compiles, uses text nodes, and preserves zero versu
   assert.equal(secondsCells[4].textContent, '1.234'); assert.equal(secondsCells[10].textContent, '0');
   assert.equal(secondsCells[11].textContent, '0.025'); assert.equal(secondsCells[14].textContent, '4.567');
   assert.equal(secondsCells[5].textContent, '1,234');
-  const summaryText = byId('monitor-summary').children.map(child => child.textContent).join('\n');
-  assert.match(summaryText, /平均首响应 s：1.234/); assert.match(summaryText, /平均首输出 s：0/); assert.match(summaryText, /平均正文首字 s：0.025/);
+  const tiles = new Map(byId('monitor-summary').children.map(tile => [tile.children[1].textContent, tile.children[0].textContent]));
+  assert.equal(tiles.get('平均首响应 s'), '1.234');
+  assert.equal(tiles.has('平均首输出 s'), false, 'secondary metrics stay hidden until the detail toggle is on');
+  byId('monitor-detail').checked = true; byId('usage-monitor').classList = { toggle() {} };
+  byId('monitor-detail').listeners.change();
+  const detailed = new Map(byId('monitor-summary').children.map(tile => [tile.children[1].textContent, tile.children[0].textContent]));
+  assert.equal(detailed.get('平均首输出 s'), '0'); assert.equal(detailed.get('平均正文首字 s'), '0.025');
   assert.equal(byId('monitor-status').hidden, true);
   const html = renderPanel({ nonce: 'safe', cspSource: 'test:' });
-  assert.match(html, /用量与性能/); assert.match(html, /connect-src 'none'/);
+  assert.match(html, /id="usage-monitor"/); assert.match(html, /connect-src 'none'/);
   new vm.Script(html.match(/<script[^>]*>([\s\S]*?)<\/script>/)[1]);
 });
-test('usage monitor renders as the last section of the panel', () => {
+test('usage monitor renders once inside the usage tab', () => {
   const html = renderPanel({ nonce: 'safe', cspSource: 'test:' });
   const monitor = html.indexOf('id="usage-monitor"');
   assert.equal(html.indexOf('id="usage-monitor"', monitor + 1), -1, 'usage monitor markup appears once');
-  assert.ok(monitor > html.indexOf('id="native-models"'), 'usage monitor follows the official model list');
-  assert.ok(monitor > html.indexOf('保存后在新建会话中使用。'), 'usage monitor follows the closing footnote');
-  assert.ok(monitor < html.indexOf('</main>'), 'usage monitor stays inside the panel body');
+  assert.ok(monitor > html.indexOf('id="view-usage"'), 'usage monitor sits in the usage tab');
+  assert.ok(monitor < html.indexOf('id="view-settings"'), 'usage monitor stays out of the settings tab');
 });
 test('panel refresh is isolated, concurrent reads are coalesced and disposal suppresses posts', async () => {
   const posts = []; let onMessage, onClose, finish, reads = 0;

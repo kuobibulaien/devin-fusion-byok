@@ -2,7 +2,7 @@
 const crypto = require('node:crypto');
 const { renderPanel } = require('./view.cjs');
 const { PanelInputError } = require('./model.cjs');
-function createPanelController({ vscode, context, manager, safeError, updater, readMonitor = async () => ({ status: 'unsupported', snapshot: null }) }) {
+function createPanelController({ vscode, context, manager, safeError, updater, restartApp, readMonitor = async () => ({ status: 'unsupported', snapshot: null }) }) {
   let panel;
   let monitorPending = false;
   const refreshMonitor = async () => {
@@ -38,6 +38,16 @@ function createPanelController({ vscode, context, manager, safeError, updater, r
       if (!message || typeof message.id !== 'string' || message.id.length > 100 || typeof message.type !== 'string') return;
       if (message.type === 'monitor.refresh') { await refreshMonitor(); return; }
       try {
+        if (message.type === 'app.restart') {
+          if (typeof restartApp !== 'function') throw new PanelInputError('当前环境不支持重启 Devin。');
+          const choice = await vscode.window.showWarningMessage('重启 Devin 会关闭所有窗口，并中断正在进行的对话。确定现在重启吗？', { modal: true }, '重启');
+          if (choice === '重启') {
+            try { await restartApp(); }
+            catch { throw new PanelInputError('无法自动重启 Devin，请手动退出后重新打开。'); }
+          }
+          await current.webview.postMessage({ type: 'result', id: message.id, ok: true, cancelled: choice !== '重启' });
+          return;
+        }
         if (message.type.startsWith('update.') && updater) {
           if (message.type === 'update.check') await updater.check({ force: true });
           else if (message.type === 'update.install') await updater.installUpdate();

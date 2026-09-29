@@ -450,6 +450,7 @@ async function activate(context) {
   const updater = require('./update.cjs').createUpdateHost({ vscode, context,
     onChange: () => management?.publishUpdates?.() });
   management = require('./panel/controller.cjs').createPanelController({ vscode, context, manager, safeError, updater,
+    restartApp: () => require('./runtime/app-restart.cjs').restartApp({ vscode, spawn }),
     readMonitor: () => require('./runtime/monitor-client.cjs').readMonitor({ root }) });
   let contextObserver;
   try {

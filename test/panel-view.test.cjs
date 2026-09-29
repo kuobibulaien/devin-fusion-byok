@@ -83,3 +83,21 @@ test('the effort hint lists the Max preset and notes provider-dependent support'
   assert.ok(effortHint.includes('Max'), 'the automatic preset hint mentions Max');
   assert.ok(/供应商/.test(effortHint), 'the hint notes that the supported tiers depend on the provider');
 });
+
+test('a model switch saves right away without a separate apply step', () => {
+  const { byId, posts, receive } = panel();
+  receive({ data: { type: 'state', state: state() } });
+  const toggle = collect(byId('models'), 'input', node => node.attributes['aria-label'] === '启用模型 Saved')[0];
+  assert.ok(toggle, 'the model switch is rendered');
+  toggle.listeners.change({ target: { checked: false } });
+  const update = posts.find(message => message.type === 'updateModels');
+  assert.deepEqual(JSON.parse(JSON.stringify(update.payload)), { providerId: 'cpa', changes: [{ id: 'saved', enabled: false }] });
+});
+
+test('deleting a model lives in its edit dialog', () => {
+  const { byId, receive } = panel();
+  receive({ data: { type: 'state', state: state() } });
+  assert.equal(collect(byId('models'), 'button', node => node.textContent === '删除').length, 0, 'rows carry no delete button');
+  collect(byId('models'), 'button', node => String(node.attributes['aria-label'] || '').startsWith('编辑模型'))[0].listeners.click();
+  assert.equal(collect(byId('editor-dialog'), 'button', node => node.textContent === '删除').length, 1);
+});

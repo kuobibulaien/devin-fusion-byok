@@ -12,6 +12,8 @@ function modelEfforts(model) {
     // The null variant retains previously saved UIDs and provider-default behavior.
     return [null, 'low', 'medium', 'high', 'xhigh', 'max'];
   }
+  // Claude Opus/Sonnet/Fable 4.6+ accept output_config.effort; Haiku does not.
+  if (/^claude-(?:opus|sonnet|fable|mythos)-(?:[5-9]|4-[6-9])(?:[-.]|$)/i.test(id)) return [null, 'low', 'medium', 'high', 'xhigh', 'max'];
   return [null];
 }
 
