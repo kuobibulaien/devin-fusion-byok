@@ -103,6 +103,10 @@ npm test          # 运行测试
 npm run package   # 生成 VSIX
 ```
 
+## 交流
+
+作者活跃于 [LINUX DO · @koubibulaien](https://linux.do/u/koubibulaien)，欢迎交流和反馈问题。
+
 ## 许可
 
 [MIT](LICENSE)。第三方声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
