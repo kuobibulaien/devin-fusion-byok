@@ -142,7 +142,7 @@ function installGoalContinue({ nativeMainPath, isEnabled = () => false, log = ()
   const goalRequests = new WeakSet();
   const activeRuns = new Map();
   const runGenerations = new Map();
-  const observedRunning = new Set();
+  const activeTurns = new Map();
   const ambiguousNotified = new Set();
   const owners = new Set();
   let listener = null;
@@ -168,7 +168,7 @@ function installGoalContinue({ nativeMainPath, isEnabled = () => false, log = ()
   }
   function clearRun(sessionId) {
     activeRuns.delete(sessionId);
-    observedRunning.delete(sessionId);
+    activeTurns.delete(sessionId);
     nextGeneration(sessionId);
   }
 
@@ -241,7 +241,8 @@ function installGoalContinue({ nativeMainPath, isEnabled = () => false, log = ()
       report('goal-command', { action: command.action, run: !!action.runId });
       return {
         request: { ...request, params: { ...request.params, prompt: [{ type: 'text', text: action.prompt }] } },
-        runId: typeof action.runId === 'string' && action.runId ? action.runId : null
+        runId: typeof action.runId === 'string' && action.runId ? action.runId : null,
+        localText: typeof action.localText === 'string' ? action.localText : null
       };
     }
 
@@ -249,14 +250,41 @@ function installGoalContinue({ nativeMainPath, isEnabled = () => false, log = ()
       let request = args[0];
       const method = request?.method, sessionId = sessionIdentifier(request?.params?.sessionId);
       let isGoal = goalRequests.has(request);
+      let isCommandReply = false;
       if (!disposed && entry.active && sessionId && method === 'session/prompt' && !isGoal) {
         const rewritten = rewriteGoalCommand(request, sessionId);
         if (rewritten) {
+          // A command-only reply must not create a second ACP turn while the
+          // Goal is live: v2 state events do not identify their request.
+          if (!rewritten.runId && (activeRuns.has(sessionId) || activeTurns.has(sessionId))) {
+            const localText = rewritten.localText ?? 'Goal 控制命令已处理。';
+            const messageId = crypto.randomUUID();
+            const meta = { 'cognition.ai/streaming': false, 'cognition.ai/streamingMessageId': messageId };
+            const update = connector.protocolVersion >= 2 ? {
+              sessionUpdate: 'agent_message', messageId, _meta: meta,
+              content: [{ type: 'text', text: localText }]
+            } : { sessionUpdate: 'agent_message_chunk', messageId, _meta: meta, content: { type: 'text', text: localText } };
+            // Use the native forwarder directly so this display-only message
+            // cannot affect the live Goal's transport state.
+            const liveTurn = activeTurns.get(sessionId);
+            return Promise.resolve(Reflect.apply(originalForward, this, [
+              { method: 'session/update', params: { sessionId, update } }
+            ])).then(() => {
+              // v2 permits a non-terminal acknowledgement. v1 requires the
+              // real stopReason, so wait for the existing native request result.
+              if (connector.protocolVersion >= 2) return {};
+              if (liveTurn && liveTurn.result !== undefined) return liveTurn.result;
+              throw new Error('Active Goal request result is unavailable');
+            });
+          }
           request = rewritten.request;
           args = [request, ...args.slice(1)];
           isGoal = true;
-          clearRun(sessionId);
-          if (rewritten.runId) activeRuns.set(sessionId, rewritten.runId);
+          isCommandReply = !rewritten.runId;
+          if (rewritten.runId) {
+            clearRun(sessionId);
+            activeRuns.set(sessionId, rewritten.runId);
+          }
         }
       }
       if (!disposed && entry.active && sessionId) {
@@ -279,16 +307,50 @@ function installGoalContinue({ nativeMainPath, isEnabled = () => false, log = ()
       if (isGoal) goalRequests.delete(request);
       const isV1 = !(connector.protocolVersion >= 2);
       const requestGeneration = sessionId ? currentGeneration(sessionId) : null;
+      // Completion belongs to the prompt that started it, never to a bare idle
+      // event or whichever Goal happens to remain cancellable on this session.
+      const turn = method === 'session/prompt' && sessionId ? {
+        kind: isCommandReply ? 'command' : isGoal ? 'goal' : 'user',
+        runId: isGoal && !isCommandReply ? activeRuns.get(sessionId) : null,
+        protocolVersion: isV1 ? 1 : 2, running: false, consumed: false
+      } : null;
+      if (turn) activeTurns.set(sessionId, turn);
+      function finishTurn(stopReason) {
+        if (!turn || turn.consumed || currentGeneration(sessionId) !== requestGeneration) return;
+        if (turn.kind === 'goal') {
+          if (!turn.runId || activeRuns.get(sessionId) !== turn.runId) return;
+          turn.consumed = true;
+          clearRun(sessionId);
+          touch(sessionId, 'idle');
+          notify(sessionId, 'idle', { runId: turn.runId, stopReason });
+        } else if (activeTurns.get(sessionId) === turn) {
+          turn.consumed = true;
+          activeTurns.delete(sessionId);
+          touch(sessionId, activeRuns.has(sessionId) ? 'busy' : 'idle');
+          if (turn.kind === 'user' && stopReason === 'end_turn' && owners.has(sessionId)) notify(sessionId, 'user-idle');
+        }
+      }
+      function failTurn() {
+        if (!turn || turn.consumed || currentGeneration(sessionId) !== requestGeneration) return;
+        if (turn.kind === 'command') {
+          turn.consumed = true;
+          if (activeTurns.get(sessionId) === turn) activeTurns.delete(sessionId);
+          touch(sessionId, activeRuns.has(sessionId) ? 'busy' : 'unknown');
+          return;
+        }
+        clearRun(sessionId);
+        touch(sessionId, 'unknown');
+        notify(sessionId, 'interrupted', { reason: 'send-failed' });
+      }
       let result;
       try { result = Reflect.apply(originalSend, this, args); }
       catch (error) {
         if (method === 'session/prompt' && sessionId && currentGeneration(sessionId) === requestGeneration) {
-          clearRun(sessionId);
-          touch(sessionId, 'unknown');
-          notify(sessionId, 'interrupted', { reason: 'send-failed' });
+          failTurn();
         }
         throw error;
       }
+      if (turn) turn.result = result;
       const complete = value => {
         if (disposed || !entry.active) return value;
         if (SESSION_METHODS.has(method)) {
@@ -298,24 +360,14 @@ function installGoalContinue({ nativeMainPath, isEnabled = () => false, log = ()
         }
         if (method === 'session/prompt' && sessionId && isV1) {
           if (currentGeneration(sessionId) !== requestGeneration) return value;
-          const runId = activeRuns.get(sessionId);
-          if (runId) {
-            clearRun(sessionId);
-            touch(sessionId, 'idle');
-            notify(sessionId, 'idle', { runId, stopReason: typeof value?.stopReason === 'string' ? value.stopReason : null });
-          } else {
-            touch(sessionId, 'idle');
-            if (owners.has(sessionId)) notify(sessionId, 'user-idle');
-          }
+          finishTurn(typeof value?.stopReason === 'string' ? value.stopReason : null);
         }
         return value;
       };
       const failed = error => {
         if (!disposed && entry.active && method === 'session/prompt' && sessionId &&
             currentGeneration(sessionId) === requestGeneration) {
-          clearRun(sessionId);
-          touch(sessionId, 'unknown');
-          notify(sessionId, 'interrupted', { reason: 'send-failed' });
+          failTurn();
         }
         throw error;
       };
@@ -357,7 +409,8 @@ function installGoalContinue({ nativeMainPath, isEnabled = () => false, log = ()
       if (kind === 'state_update') {
         if (update.state === 'running') {
           if (adopted) {
-            if (activeRuns.has(sessionId)) observedRunning.add(sessionId);
+            const turn = activeTurns.get(sessionId);
+            if (turn?.protocolVersion === 2) turn.running = true;
             touch(sessionId, 'busy');
           }
           return;
@@ -370,13 +423,21 @@ function installGoalContinue({ nativeMainPath, isEnabled = () => false, log = ()
         }
         if (update.state === 'idle') {
           if (!adopted) return;
-          touch(sessionId, 'idle');
-          const runId = activeRuns.get(sessionId);
-          if (runId && observedRunning.has(sessionId)) {
+          const turn = activeTurns.get(sessionId);
+          if (!turn) { touch(sessionId, activeRuns.has(sessionId) ? 'busy' : 'idle'); return; }
+          // v1 completes through its request result. v2 acknowledgements do not
+          // finish turns; only its state event consumes the current prompt.
+          if (turn.protocolVersion !== 2 || turn.consumed) return;
+          if ((turn.kind === 'goal' || turn.kind === 'user') && !turn.running) return;
+          turn.consumed = true;
+          activeTurns.delete(sessionId);
+          if (turn.kind === 'goal' && activeRuns.get(sessionId) === turn.runId) {
             clearRun(sessionId);
-            notify(sessionId, 'idle', { runId, stopReason: update.stopReason ?? null });
-          } else if (!runId && owners.has(sessionId)) {
-            notify(sessionId, 'user-idle');
+            touch(sessionId, 'idle');
+            notify(sessionId, 'idle', { runId: turn.runId, stopReason: update.stopReason ?? null });
+          } else {
+            touch(sessionId, activeRuns.has(sessionId) ? 'busy' : 'idle');
+            if (turn.kind === 'user' && update.stopReason === 'end_turn' && owners.has(sessionId)) notify(sessionId, 'user-idle');
           }
           return;
         }
@@ -570,7 +631,7 @@ function installGoalContinue({ nativeMainPath, isEnabled = () => false, log = ()
       sessions.clear();
       activeRuns.clear();
       runGenerations.clear();
-      observedRunning.clear();
+      activeTurns.clear();
       ambiguousNotified.clear();
       owners.clear();
       commandHandler = null;

@@ -114,7 +114,8 @@ test('a user turn ending on a goal-owned session reports user-idle', async () =>
     handle.setListener(event => events.push(event));
     await c.sendRequest({ method: 'session/prompt', params: { sessionId: 's1', prompt: text('answer') } });
     handle.setGoalOwned('s1', true);
-    c.forwardClientRequest(update('s1', { sessionUpdate: 'state_update', state: 'idle' }));
+    c.forwardClientRequest(update('s1', { sessionUpdate: 'state_update', state: 'running' }));
+    c.forwardClientRequest(update('s1', { sessionUpdate: 'state_update', state: 'idle', stopReason: 'end_turn' }));
     c.forwardClientRequest(update('s2', { sessionUpdate: 'state_update', state: 'idle' }));
     assert.deepEqual([...events.filter(e => e.type === 'user-idle').map(e => e.sessionId)], ['s1']);
   } finally { handle.dispose(); }

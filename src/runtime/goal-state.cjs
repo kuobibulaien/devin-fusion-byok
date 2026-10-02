@@ -404,7 +404,7 @@ function createGoalController({
     if (last) lines.push('最近进展：' + last.evidence);
     return lines.join('\n');
   }
-  function reply(text) { return { prompt: commandReplyPrompt(text) }; }
+  function reply(text) { return { prompt: commandReplyPrompt(text), localText: text }; }
   function beginRun(record) {
     const prepared = prepareRun(record);
     if (!prepared.runId) throw goalError('dispatch-failed', '目标状态写入失败，没有开始运行。');

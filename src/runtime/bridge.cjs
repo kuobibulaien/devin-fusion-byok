@@ -25,6 +25,14 @@ async function collect(stream, limit = 64 * 1024 * 1024) {
   return Buffer.concat(chunks, length);
 }
 function forward(request, response, target, { body, getCatalog, log = () => {}, onFusionStatus, onNativeModels } = {}) {
+  let incoming;
+  const fail = () => {
+    incoming?.destroy();
+    outbound.destroy();
+    if (response.destroyed || response.writableEnded) return;
+    if (response.headersSent) response.destroy();
+    else { response.writeHead(502); response.end(); }
+  };
   const headers = { ...request.headers, host: target.host };
   delete headers['proxy-connection'];
   if (body !== undefined) {
@@ -32,6 +40,10 @@ function forward(request, response, target, { body, getCatalog, log = () => {}, 
     delete headers['transfer-encoding'];
   }
   const outbound = (target.protocol === 'https:' ? https : http).request(target, { method: request.method, headers }, async upstream => {
+    incoming = upstream;
+    upstream.on('error', fail);
+    upstream.on('aborted', fail);
+    upstream.on('close', () => { if (!upstream.complete) fail(); });
     if (!CATALOG.test(target.pathname) || upstream.statusCode !== 200 || !getCatalog) {
       response.writeHead(upstream.statusCode, { ...upstream.headers, ...cors(request) }); upstream.pipe(response); return;
     }
@@ -50,11 +62,13 @@ function forward(request, response, target, { body, getCatalog, log = () => {}, 
         log('catalog', { rpc: target.pathname.split('/').pop(), models: catalog.models.length, format: format.type, changed: !original.equals(outgoing), before: original.length, after: outgoing.length, keys: format.json ? Object.keys(format.data) : undefined, beforeOwn: countOwn(format.data), afterOwn: countOwn(augmented) });
       } catch { log('catalog-error', { code: 'catalog_transform_failed' }); }
       response.writeHead(upstream.statusCode, outgoingHeaders); response.end(outgoing);
-    } catch { response.destroy(); }
+    } catch { fail(); }
   });
-  outbound.on('error', () => { if (!response.headersSent) response.writeHead(502); response.end(); });
-  request.on('aborted', () => outbound.destroy());
-  response.on('close', () => { if (!response.writableFinished) outbound.destroy(); });
+  outbound.on('error', fail);
+  request.on('error', fail);
+  request.on('aborted', fail);
+  response.on('error', fail);
+  response.on('close', () => { if (!response.writableFinished) { incoming?.destroy(); outbound.destroy(); } });
   if (body !== undefined) outbound.end(body); else request.pipe(outbound);
 }
 async function createLsBridge(originalPort, options) {

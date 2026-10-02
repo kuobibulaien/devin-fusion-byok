@@ -32,7 +32,7 @@ async function discover(provider) {
     const url = new URL(provider.baseUrl.replace(/\/$/, '') + '/models');
     if (!['http:', 'https:'].includes(url.protocol)) throw new Error('API 地址必须以 http:// 或 https:// 开头');
     if (anthropic) { url.searchParams.set('limit', '1000'); if (after) url.searchParams.set('after_id', after); }
-    const response = await fetch(url, { headers, signal: AbortSignal.timeout(20000) });
+    const response = await fetch(url, { headers, redirect: 'error', signal: AbortSignal.timeout(20000) });
     if (!response.ok) throw new Error('获取模型失败：HTTP ' + response.status);
     const json = await response.json();
     if (!Array.isArray(json.data)) throw new Error('API 未返回模型列表');

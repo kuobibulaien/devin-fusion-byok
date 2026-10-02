@@ -313,6 +313,7 @@ async function serveChat({ request, route, provider, res, signal, log = () => {}
 
     armTimer(firstResponseLimit, 'upstream_timeout');
     const upstream = await fetch(url, {
+      redirect: 'error',
       method: 'POST',
       headers: {
         'content-type': 'application/json',

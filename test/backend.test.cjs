@@ -13,6 +13,28 @@ const wire = require('../src/protocol/wire.cjs');
 const http = require('node:http');
 const API = '/exa.api_server_pb.ApiServerService/';
 
+test('same-version Anthropic adapter changes invalidate the runtime source identity', () => {
+  const filename = path.resolve(__dirname, '../src/runtime/backend.cjs');
+  const realRequire = createRequire(filename);
+  let adapterChanged = false;
+  const module = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
+    module, exports: module.exports, __dirname: path.dirname(filename), process,
+    require(name) {
+      if (name === 'node:fs') return { ...fs, readFileSync(file, ...options) {
+        const original = fs.readFileSync(file, ...options);
+        return adapterChanged && path.resolve(file) === path.resolve(__dirname, '../src/protocol/anthropic.cjs')
+          ? Buffer.concat([Buffer.from(original), Buffer.from('\n// synthetic adapter change\n')]) : original;
+      } };
+      return realRequire(name);
+    },
+  }, { filename });
+  const loaded = module.exports.runtimeIdentity('/synthetic-runtime-root');
+  adapterChanged = true;
+  assert.notEqual(module.exports.runtimeIdentity('/synthetic-runtime-root', true).sourceId, loaded.sourceId);
+  assert.equal(module.exports.runtimeIdentity('/synthetic-runtime-root').sourceId, loaded.sourceId);
+});
+
 async function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'devin-backend-test-'));
   const config = { providers: [{ id: 'test', name: 'Test', models: [{ id: 'model', label: 'Model' }] }], sidekicks: [{ nativeUid: 'swe-2-max', label: 'SWE-2 Max' }],
