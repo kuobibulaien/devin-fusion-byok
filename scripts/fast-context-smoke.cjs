@@ -51,7 +51,7 @@ async function main() {
     child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
     const tools = await call('tools/list', {});
     const started = Date.now();
-    const response = await call('tools/call', { name: 'fast_context_search',
+    const response = await call('tools/call', { name: 'code_search',
       arguments: { query: 'Find where request tokens are authenticated and how failed authentication becomes an HTTP 401. Include the implementation and its caller.', max_turns: 2 } });
     const result = response.result?.structuredContent;
     let verified = !response.error && !response.result?.isError && result?.files?.some(file => file.path === path.join(root, 'src/auth.cjs')) &&

@@ -100,6 +100,33 @@ test('normal window unload restores its LS hook without reverting shared CLI env
   assert.equal(f.globals.agentEnv['devin-cli'].KEEP, 'user-value');
   assert.ok(!f.logs.some(line => line.includes('error')));
 });
+function writeHostState(root, disabled) {
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(path.join(path.dirname(root), 'state.vscdb'));
+  db.exec('CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)');
+  db.prepare('INSERT INTO ItemTable (key, value) VALUES (?, ?)').run('extensionsIdentifiers/disabled', JSON.stringify(disabled.map(id => ({ id }))));
+  db.close();
+}
+test('disabling in the extension manager restores owned env on unload, keeping the plugin enabled for next time', async t => {
+  const f = fixture(t); await f.activate(f.context);
+  assert.equal(f.globals.agentEnv['devin-cli'].WINDSURF_API_SERVER_URL, 'http://127.0.0.1:39842');
+  writeHostState(f.root, ['github.copilot-chat', 'Local.Devin-Fusion-BYOK']);
+  await f.deactivate();
+  assert.equal(f.counts().disposed, 1);
+  assert.ok(!Object.hasOwn(f.globals.agentEnv['devin-cli'], 'WINDSURF_API_SERVER_URL'));
+  assert.equal(f.globals.agentEnv['devin-cli'].KEEP, 'user-value');
+  assert.notEqual(JSON.parse(fs.readFileSync(f.configFile, 'utf8')).enabled, false, 'the panel switch is not flipped');
+});
+test('an unrelated disabled list or an unreadable database keeps the shared env on unload', async t => {
+  const f = fixture(t); await f.activate(f.context);
+  writeHostState(f.root, ['github.copilot-chat']);
+  await f.deactivate();
+  assert.equal(f.globals.agentEnv['devin-cli'].WINDSURF_API_SERVER_URL, 'http://127.0.0.1:39842');
+  const g = fixture(t); await g.activate(g.context);
+  fs.writeFileSync(path.join(path.dirname(g.root), 'state.vscdb'), 'not a database');
+  await g.deactivate();
+  assert.equal(g.globals.agentEnv['devin-cli'].WINDSURF_API_SERVER_URL, 'http://127.0.0.1:39842');
+});
 test('explicit disable restores owned env and any own Fusion selection, preserving native preference fields', async t => {
   const f = fixture(t); await f.activate(f.context);
   await f.commands.get('devinFusionByok.selectFusion')();

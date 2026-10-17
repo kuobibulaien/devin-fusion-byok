@@ -27,23 +27,33 @@ function createPanelController({ vscode, context, manager, safeError, updater, r
   const publishUpdates = () => panel && updater ? panel.webview.postMessage({ type: 'update-state', state: updater.snapshot() }) : undefined;
   const publish = () => panel ? postState(panel, manager.state()) : undefined;
   const FAST_CONTEXT_ERRORS = { fast_context_root_not_allowed: '只能选择已打开的项目或在此处选择的文件夹。',
-    fast_context_root_missing: '该文件夹不存在或无法访问，请重新选择。', fast_context_untrusted: '请先信任工作区，再复制 Fast Context 配置。' };
+    fast_context_root_missing: '该文件夹不存在或无法访问，请重新选择。', fast_context_untrusted: '请先信任工作区，再复制 Fast Context 配置。',
+    fast_context_check_required: '请先检测账号，确认代码搜索可用后再开启。', fast_context_not_enabled: '对外 MCP 还没有开启。',
+    fast_context_unavailable: '当前环境无法保存开关状态。' };
+  const FAST_CONTEXT_COPIED = { prompt: '提示词已复制，粘贴给其他 Harness 里的 Agent 即可。', json: '配置 JSON 已复制。' };
   async function handleFastContext(target, message) {
     const post = value => target.webview.postMessage(value);
     if (!fastContext) { await post({ type: 'fast-context-result', ok: false, text: '当前环境不支持 Fast Context 配置。' }); return; }
+    const kind = Object.hasOwn(FAST_CONTEXT_COPIED, message.payload?.kind) ? message.payload.kind : 'prompt';
     let selected;
     try {
       if (message.type === 'fastContext.check') {
         const result = await fastContext.selfCheck();
-        await post({ type: 'fast-context-result', ok: result.ok, text: fastContext.checkMessage(result.reason) });
+        await post({ type: 'fast-context-result', check: true, ok: result.ok, text: fastContext.checkMessage(result.reason) });
+      } else if (message.type === 'fastContext.enable') {
+        await fastContext.setEnabled(message.payload?.enabled === true);
+      } else if (message.type === 'fastContext.preview') {
+        await post({ type: 'fast-context-preview', kind, root: message.payload?.root, text: fastContext.preview(kind, message.payload?.root) });
+        return;
       } else if (message.type === 'fastContext.pick') selected = await fastContext.pick() || undefined;
       else if (message.type === 'fastContext.copy') {
-        const kind = message.payload?.kind === 'config' ? 'config' : 'prompt';
         await fastContext.copy(kind, message.payload?.root);
-        await post({ type: 'fast-context-result', ok: true, text: kind === 'prompt' ? '提示词已复制，粘贴给其他 Harness 里的 Agent 即可。' : '配置 JSON 已复制。' });
+        await post({ type: 'fast-context-result', ok: true, text: FAST_CONTEXT_COPIED[kind] });
       } else if (message.type !== 'fastContext.state') return;
     } catch (error) {
-      await post({ type: 'fast-context-result', ok: false, text: FAST_CONTEXT_ERRORS[error?.message] || safeError(error).message });
+      const text = FAST_CONTEXT_ERRORS[error?.message] || safeError(error).message;
+      if (message.type === 'fastContext.preview') { await post({ type: 'fast-context-preview', kind, root: message.payload?.root, text: '', error: text }); return; }
+      await post({ type: 'fast-context-result', check: message.type === 'fastContext.check', enable: message.type === 'fastContext.enable', ok: false, text });
     }
     await post({ type: 'fast-context-state', state: fastContext.state(), selected });
   }

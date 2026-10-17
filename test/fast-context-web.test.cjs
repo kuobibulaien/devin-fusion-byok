@@ -4,15 +4,15 @@ const assert = require('node:assert/strict');
 const { PassThrough } = require('node:stream');
 const { s, m, v } = require('../src/protocol/wire.cjs');
 const { startServer, safeError } = require('../src/fast-context/server.cjs');
-const { createWebClient, authorize, readResults, searchOptions, readOptions, fetchPage, htmlToText, LIMITS } = require('../src/fast-context/web.cjs');
+const { createWebClient, authorize, readResults, searchOptions, readOptions, fetchPage, htmlToText, isPrivateAddress, LIMITS } = require('../src/fast-context/web.cjs');
 const { createSelfCheck, CHECK_MESSAGES } = require('../src/fast-context/self-check.cjs');
 
 const TOKEN = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJl';
 const KEY = 'devin-session-token$preview';
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
-// Fake official server: JWT exchange, team policy and the two web RPCs.
-function fakeServer({ webSearch = true, disabled = false, results = [], page = 'Example page text', status = 200 } = {}) {
+// Fake official server: JWT exchange, team policy and the search RPC.
+function fakeServer({ webSearch = true, disabled = false, results = [], status = 200 } = {}) {
   const calls = [];
   const request = async (url, options) => {
     calls.push({ url, options });
@@ -23,7 +23,6 @@ function fakeServer({ webSearch = true, disabled = false, results = [], page = '
       return new Response(Buffer.concat([...(disabled ? [v(3, 1)] : []), ...(webSearch ? [v(4, 1)] : [])]));
     }
     if (url.endsWith('/GetWebSearchResults')) return new Response(Buffer.concat(results.map(item => m(1, item))));
-    if (url.endsWith('/GetWebSearchRedirect')) return new Response(page);
     return new Response('not found', { status: 404 });
   };
   return { request, calls };
@@ -48,6 +47,8 @@ test('web search honours the account switch and team ban without bypassing them'
   const off = createWebClient({ key: KEY, request: fakeServer({ webSearch: false }).request });
   await assert.rejects(off.search({ query: 'x' }), /web_search_disabled/);
   await assert.rejects(off.read({ url: 'https://example.com' }), /web_search_disabled/);
+  const blocked = createWebClient({ key: KEY, request: fakeServer({ webSearch: false }).request, pageRequest: async () => { throw new Error('must not fetch'); } });
+  await assert.rejects(blocked.read({ url: 'https://example.com' }), /web_search_disabled/);
   const banned = createWebClient({ key: KEY, request: fakeServer({ disabled: true }).request });
   await assert.rejects(banned.search({ query: 'x' }), /fast_context_disabled/);
   const denied = createWebClient({ key: KEY, request: fakeServer({ status: 403 }).request });
@@ -64,43 +65,56 @@ test('policy lookup is cached per client and fails closed on missing token', asy
   await assert.rejects(authorize({ key: KEY, request: empty }), /unauthenticated/);
 });
 
-test('page reading returns text, drops fragments and refuses non-https URLs', async () => {
-  const server = fakeServer({ page: 'Hello\nworld' });
-  const client = createWebClient({ key: KEY, request: server.request });
+const html = body => new Response(body, { headers: { 'content-type': 'text/html; charset=utf-8' } });
+const redirect = location => new Response(null, { status: 302, headers: { location } });
+
+test('page reading fetches locally after the policy check, drops fragments and refuses non-https URLs', async () => {
+  const pages = [];
+  const server = fakeServer();
+  const client = createWebClient({ key: KEY, request: server.request,
+    pageRequest: async (url, options) => { pages.push({ url, options }); return new Response('Hello\nworld', { headers: { 'content-type': 'text/plain' } }); } });
   const result = await client.read({ url: 'https://example.com/doc#section' });
   assert.equal(result.text, 'Hello\nworld');
   assert.equal(result.url, 'https://example.com/doc');
+  assert.equal(pages[0].url, 'https://example.com/doc');
+  assert.equal(pages[0].options.redirect, 'manual');
+  assert.ok(!server.calls.some(call => call.url.includes('Redirect')));
   for (const bad of ['http://example.com', 'https://u:p@example.com', 'file:///etc/passwd', 'javascript:alert(1)']) {
     await assert.rejects(client.read({ url: bad }), /invalid_arguments/);
   }
 });
 
-test('page reading follows the official resolved URL once and extracts readable text', async () => {
+test('page reading follows https redirects locally and extracts readable text', async () => {
   const pages = [];
-  const pageRequest = async (url, options) => {
-    pages.push({ url, options });
-    return new Response('<html><head><title>x</title><style>p{}</style></head><body><h1>Docs</h1><p>A &amp; B</p><script>evil()</script></body></html>',
-      { headers: { 'content-type': 'text/html; charset=utf-8' } });
+  const pageRequest = async url => {
+    pages.push(url);
+    if (url === 'https://docs.example.com/start') return redirect('/final');
+    return html('<html><head><title>x</title><style>p{}</style></head><body><h1>Docs</h1><p>A &amp; B</p><script>evil()</script></body></html>');
   };
-  const server = fakeServer({ page: 'https://docs.example.com/final\n' });
-  const client = createWebClient({ key: KEY, request: server.request, pageRequest });
+  const client = createWebClient({ key: KEY, request: fakeServer().request, pageRequest });
   const result = await client.read({ url: 'https://docs.example.com/start' });
-  assert.equal(pages.length, 1);
-  assert.equal(pages[0].url, 'https://docs.example.com/final');
-  assert.equal(pages[0].options.redirect, 'error');
+  assert.deepEqual(pages, ['https://docs.example.com/start', 'https://docs.example.com/final']);
+  assert.equal(result.final_url, 'https://docs.example.com/final');
   assert.equal(result.text, 'Docs\nA & B');
   assert.doesNotMatch(result.text, /evil/);
 });
 
-test('page reading refuses redirects, non-html bodies and plain-http targets', async () => {
-  const plain = createWebClient({ key: KEY, request: fakeServer({ page: '' }).request,
-    pageRequest: async () => new Response('binary', { headers: { 'content-type': 'image/png' } }) });
-  await assert.rejects(plain.read({ url: 'https://example.com' }), /unsupported_content_type/);
-  const httpTarget = createWebClient({ key: KEY, request: fakeServer({ page: 'http://insecure.example.com\n' }).request,
-    pageRequest: async () => { throw new Error('must not fetch'); } });
-  await assert.rejects(httpTarget.read({ url: 'https://example.com' }), /invalid_arguments/);
-  await assert.rejects(fetchPage('https://a', { request: async () => new Response('x', { status: 429 }) }), /resource_exhausted/);
+test('page reading refuses http hops, private hosts, redirect loops and non-text bodies', async () => {
+  const never = async () => { throw new Error('must not fetch'); };
+  await assert.rejects(fetchPage('https://a.example/', { request: async () => redirect('http://a.example/') }), /invalid_arguments/);
+  await assert.rejects(fetchPage('https://a.example/', { request: async () => redirect('https://127.0.0.1/admin') }), /blocked_address/);
+  for (const host of ['localhost', '10.0.0.1', '192.168.1.1', '[::1]', 'printer.local', 'intranet']) {
+    await assert.rejects(fetchPage(`https://${host}/`, { request: never }), /blocked_address/, host);
+  }
+  let hops = 0;
+  await assert.rejects(fetchPage('https://a.example/', { request: async () => { hops++; return redirect('/again'); } }), /too_many_redirects/);
+  assert.equal(hops, 6);
+  await assert.rejects(fetchPage('https://a.example/', { request: async () => new Response('binary', { headers: { 'content-type': 'image/png' } }) }), /unsupported_content_type/);
+  await assert.rejects(fetchPage('https://a.example/', { request: async () => new Response('x', { status: 429 }) }), /resource_exhausted/);
+  assert.equal(isPrivateAddress('8.8.8.8'), false);
+  assert.equal(isPrivateAddress('::ffff:127.0.0.1'), true);
   assert.equal(htmlToText('<div>a</div><ul><li>b</li></ul>'), 'a\n- b');
+  for (const code of ['blocked_address', 'too_many_redirects', 'unsupported_content_type']) assert.equal(safeError(new Error(code)), code);
 });
 
 test('argument validation stays strict for both tools', () => {
@@ -120,7 +134,7 @@ test('MCP exposes the three capabilities and never leaks upstream text', async t
   const input = new PassThrough(), output = new PassThrough(), messages = [];
   output.on('data', chunk => { for (const line of chunk.toString().trim().split('\n')) messages.push(JSON.parse(line)); });
   let webCalls = 0;
-  const server = startServer({ root: '/fixture', input, output, runSearch: async () => ({}),
+  const server = startServer({ root: '/fixture', input, output, runSearch: async () => ({}), isEnabled: () => true,
     createWeb: () => ({
       search: async args => { webCalls++; if (args.query === 'boom') throw new Error('SECRET api key'); return { results: [{ title: 't' }] }; },
       read: async args => ({ url: args.url, text: 'page' }),
@@ -135,9 +149,11 @@ test('MCP exposes the three capabilities and never leaks upstream text', async t
   send('tools/call', { name: 'web_search', arguments: { query: 'x', root: '/etc' } }, 6);
   send('tools/call', { name: 'web_read_url', arguments: { url: 'not a url' } }, 7);
   send('tools/call', { name: 'fast_context_status' }, 8);
+  send('tools/call', { name: 'constructor', arguments: {} }, 9);
   await settle();
   const tools = messages.find(m => m.id === 2).result.tools;
-  assert.deepEqual(tools.map(tool => tool.name), ['fast_context_search', 'web_search', 'web_read_url', 'fast_context_status']);
+  assert.deepEqual(tools.map(tool => tool.name), ['code_search', 'web_search', 'web_read_url', 'fast_context_status']);
+  assert.equal(messages.find(m => m.id === 9).error.code, -32602);
   assert.equal(messages.find(m => m.id === 3).result.structuredContent.results[0].title, 't');
   assert.equal(messages.find(m => m.id === 4).result.structuredContent.text, 'page', JSON.stringify(messages.find(m => m.id === 4)));
   assert.ok(messages.some(m => m.id === 8).valueOf());
@@ -151,8 +167,13 @@ test('MCP exposes the three capabilities and never leaks upstream text', async t
 });
 
 test('self check reports the kindest matching message, never the credential', async () => {
-  const ok = createSelfCheck({ loadKey: () => KEY, verify: async () => ({ webSearch: true }) });
-  assert.deepEqual(await ok.run().then(value => [value.ok, value.reason]), [true, 'ok']);
+  const ok = createSelfCheck({ loadKey: () => KEY, verify: async () => ({ codeSearch: true, webSearch: true }) });
+  assert.deepEqual(await ok.run().then(value => [value.ok, value.reason, value.capabilities]), [true, 'ok', { code: true, web: true }]);
+  // The account answering with the switch off is reported per capability, not as success.
+  const switchedOff = createSelfCheck({ loadKey: () => KEY, verify: async () => ({ codeSearch: true, webSearch: false }) });
+  assert.deepEqual(await switchedOff.run().then(value => [value.ok, value.reason, value.capabilities]), [false, 'web_search_disabled', { code: true, web: false }]);
+  const banned = createSelfCheck({ loadKey: () => KEY, verify: async () => { throw new Error('fast_context_disabled'); } });
+  assert.deepEqual((await banned.run()).capabilities, { code: false, web: null });
   assert.match(ok.message(ok.state().reason), /三项能力/);
   const off = createSelfCheck({ loadKey: () => KEY, verify: async () => { throw new Error('web_search_disabled'); } });
   await off.run();

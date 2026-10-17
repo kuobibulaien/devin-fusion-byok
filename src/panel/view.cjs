@@ -3,13 +3,13 @@ const { modelSupportsImages } = require('../model-capabilities.cjs');
 const { normalizeBaseUrlPath } = require('./base-url.cjs');
 const { monitorMarkup, monitorScript } = require('./monitor-view.cjs');
 const { updateMarkup, updateScript } = require('./update-view.cjs');
-const { fastContextMarkup, fastContextScript } = require('./fast-context-view.cjs');
+const { fastContextMarkup, fastContextScript, fastContextStyles } = require('./fast-context-view.cjs');
 
 function escapeAttribute(value) {
   return String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 }
 
-const TABS = [['presets', '预设'], ['models', '模型'], ['usage', '用量'], ['goal', 'Goal', 'Beta'], ['fastcontext', 'Fast Context'], ['settings', '设置']];
+const TABS = [['presets', '预设'], ['models', '模型'], ['usage', '用量'], ['goal', '目标'], ['fastcontext', '对外提供 MCP'], ['settings', '设置']];
 
 function goalMarkup() {
   const code = text => `<code class="cmd">${text}</code>`;
@@ -21,8 +21,8 @@ function goalMarkup() {
     ['/goal clear', '清除当前目标。']
   ].map(([command, text]) => `<div class="row"><div class="row-main"><span class="row-title">${code(command)}</span><span class="row-sub">${text}</span></div></div>`).join('');
   return `<div class="goal-doc">
-      <div class="section-head"><h2>Goal <span class="badge beta">Beta</span></h2><button id="open-goal" class="secondary" type="button">查看目标进度</button></div>
-      <p>让模型围绕一个目标一轮轮自动工作，直到它提交带证据的完成报告。在 Devin 聊天框里直接输入命令即可，不需要在这里设置。</p>
+      <div class="section-head"><h2>目标模式（Goal）</h2><div class="actions"><button id="open-goal" class="secondary" type="button">查看目标进度</button><label class="toggle"><span class="muted" id="goal-enabled-label">已关闭</span><input id="goal-enabled" class="switch" type="checkbox" role="switch" aria-label="开启目标模式" disabled></label></div></div>
+      <p>让模型围绕一个目标一轮轮自动工作，直到它提交带证据的完成报告。默认关闭；打开右上角的开关后，Devin 聊天框里才会出现 <code class="cmd">/goal</code> 命令。关闭时正在推进的目标会暂停。</p>
       <h3 class="mt">命令</h3>
       <div class="list">${rows}</div>
       <h3 class="mt">怎么写目标</h3>
@@ -36,7 +36,6 @@ function goalMarkup() {
       </ul>
       <h3 class="mt">注意</h3>
       <ul>
-        <li>这是测试版，还在收集真实使用反馈。</li>
         <li>每一轮都是一次正常的模型调用，会按你的供应商计费。${code('/goal')}、${code('/goal pause')} 等查看和控制命令也会产生一次很短的模型回复。</li>
         <li>完成报告来自模型本身，关键结果请自己再核对一下。</li>
       </ul>
@@ -92,7 +91,8 @@ function renderPanel({ nonce, cspSource }) {
     .topbar { position: sticky; top: 0; z-index: 5; background: var(--bg); border-bottom: 1px solid var(--border); margin: 0 -24px 20px; padding: 14px 24px 0; }
     .topbar-row .actions { gap: 14px; }
     .topbar-row { max-width: 960px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-    .tabs { max-width: 960px; margin: 10px auto 0; display: flex; gap: 4px; }
+    .tabs { max-width: 960px; margin: 10px auto 0; display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; }
+    .tab { flex: none; }
     .tab { background: transparent; color: var(--muted); border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 6px 12px 8px; min-height: 0; }
     .tab:hover { background: transparent; color: var(--vscode-foreground, #ddd); }
     .tab[aria-selected="true"] { color: var(--vscode-foreground, #ddd); border-bottom-color: var(--accent); }
@@ -172,6 +172,7 @@ function renderPanel({ nonce, cspSource }) {
     .dialog-error { color: var(--error); overflow-wrap: anywhere; }
     .confirm-text { white-space: pre-line; overflow-wrap: anywhere; }
     .import-picker .scroll { max-height: min(320px, 40vh); }
+    ${fastContextStyles()}
     @media (max-width: 700px) {
       body { padding: 0 16px 72px; }
       .topbar { margin: 0 -16px 16px; padding: 12px 16px 0; }
@@ -337,6 +338,9 @@ function panelClient(modelSupportsImages, vscode, normalizeBaseUrlPath) {
     byId('plugin-enabled').disabled = false;
     byId('add-provider').disabled = false;
     byId('disabled-banner').hidden = !off();
+    byId('goal-enabled').checked = state.goalEnabled === true;
+    byId('goal-enabled').disabled = off();
+    byId('goal-enabled-label').textContent = state.goalEnabled === true ? '已开启' : '已关闭';
     renderFusion();
     renderProviders();
     renderModels();
@@ -784,6 +788,11 @@ function panelClient(modelSupportsImages, vscode, normalizeBaseUrlPath) {
     setEnabled(value).then(ok => { if (!ok) event.target.checked = !value; });
   });
   byId('enable-now').addEventListener('click', () => setEnabled(true));
+  byId('goal-enabled').addEventListener('change', event => {
+    const value = event.target.checked;
+    run(() => request('setGoalEnabled', { enabled: value }), value ? '正在开启目标模式…' : '正在关闭目标模式…',
+      value ? '目标模式已开启，新的对话里可以使用 /goal。' : '目标模式已关闭。').then(ok => { if (!ok) event.target.checked = !value; });
+  });
   byId('open-goal').addEventListener('click', () => {
     request('goal.open').catch(error => notice(error.message || '无法打开目标进度。', 'error'));
   });

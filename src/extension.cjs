@@ -15,7 +15,9 @@ const { installAutoContinue } = require('./runtime/auto-continue.cjs');
 const { installGoalContinue } = require('./runtime/goal-continue.cjs');
 const { createPickerRefresh } = require('./runtime/picker-refresh.cjs');
 const { createGoalController } = require('./runtime/goal-state.cjs');
+const { isHostDisabled } = require('./lifecycle/host-disabled.cjs');
 let stopNativeSync;
+let restoreOnHostDisable;
 let stopAutoContinue;
 let resetAutoContinue;
 let cancelAutoContinueSession;
@@ -153,9 +155,10 @@ async function activate(context) {
   })();
   try {
     if (nativeMain) {
+      // Goal mode is opt-in: /goal is neither advertised nor intercepted until the user turns it on.
       goalContinue = installGoalContinue({
         nativeMainPath: nativeMain,
-        isEnabled: () => !activationDisposed && config().enabled !== false
+        isEnabled: () => !activationDisposed && config().enabled !== false && config().goalEnabled === true
       });
       autoContinue = installAutoContinue({
         nativeMainPath: nativeMain,
@@ -189,7 +192,7 @@ async function activate(context) {
             return goalContinue.setGoalOwned(sessionId, owned);
           }
         },
-        isEnabled: () => !activationDisposed && config().enabled !== false,
+        isEnabled: () => !activationDisposed && config().enabled !== false && config().goalEnabled === true,
         isTrusted: () => vscode.workspace.isTrusted !== false,
         reportCliPath: path.join(context.extensionPath, 'src/runtime/goal-report.cjs'),
         log
@@ -387,10 +390,9 @@ async function activate(context) {
     vscode.window.showInformationMessage('Fusion 模型已保存，请新建 Devin Local 会话。');
   })));
   context.subscriptions.push(vscode.commands.registerCommand('devinFusionByok.status', () => { log('status', { runtime: connection?.status, models: config().providers.map(p => ({ name: p.name, models: p.models.length })) }); output.show(true); }));
-  const disable = async () => {
-    try { goalController?.suspend({ reason: 'disabled' }); } catch { log('goal-suspend-failed'); }
-    const current = config(); current.enabled = false; writeConfig(configFile, current);
-    await teardown();
+  // Restores only the settings values this extension wrote and the user has not
+  // changed since, using the receipt. Does not touch the plugin's own enabled flag.
+  const restoreOwnedSettings = async () => {
     const settings = vscode.workspace.getConfiguration('devin.acp');
     const snapshot = { 'devin.acp.agentEnv': globalSetting(settings, 'agentEnv'), 'devin.acp.agentPreferences': globalSetting(settings, 'agentPreferences') };
     const receipt = readReceipt(root, context.extensionPath);
@@ -411,7 +413,21 @@ async function activate(context) {
     receipt.changes = []; saveReceipt(receipt);
     await context.globalState.update('savedEnv', undefined);
     await context.globalState.update('managedEnv', undefined);
+  };
+  const disable = async () => {
+    try { goalController?.suspend({ reason: 'disabled' }); } catch { log('goal-suspend-failed'); }
+    const current = config(); current.enabled = false; writeConfig(configFile, current);
+    await teardown();
+    await restoreOwnedSettings();
     vscode.window.showInformationMessage('Fusion BYOK 已停用，原生连接已恢复。');
+  };
+  // Disabling in the extension manager restarts the extension host and never runs
+  // the disable command; without this the native CLI keeps pointing at a runtime
+  // that no longer starts. A plain reload or quit keeps the shared settings.
+  restoreOnHostDisable = async () => {
+    if (!isHostDisabled({ storageRoot: root })) return;
+    await restoreOwnedSettings();
+    log('host-disabled-settings-restored');
   };
   context.subscriptions.push(vscode.commands.registerCommand('devinFusionByok.disable', run(disable)));
   const reconcileSelection = async () => {
@@ -445,7 +461,9 @@ async function activate(context) {
     selectFusion: saveFusionChoice,
     afterChange: async type => {
       if (type === 'setEnabled' && config().enabled === false) await disable();
-      else if (type === 'setAutoContinue' || type === 'setAutoContinueUntilPlanComplete') resetAutoContinue?.();
+      else if (type === 'setGoalEnabled') {
+        if (config().goalEnabled !== true) { try { goalController?.suspend({ reason: 'disabled' }); } catch { log('goal-suspend-failed'); } }
+      } else if (type === 'setAutoContinue' || type === 'setAutoContinueUntilPlanComplete') resetAutoContinue?.();
       else if (config().enabled !== false) { await ensureEnabled(); await reconcileSelection(); }
       pickerRefresh.changed();
     } });
@@ -533,5 +551,7 @@ async function deactivate() {
   stopAutoContinue?.(); stopAutoContinue = undefined;
   stopGoalContinue?.(); stopGoalContinue = undefined;
   await teardown();
+  const restore = restoreOnHostDisable; restoreOnHostDisable = undefined;
+  try { await restore?.(); } catch {}
 }
 module.exports = { activate, deactivate, ensureBackend, safeError };

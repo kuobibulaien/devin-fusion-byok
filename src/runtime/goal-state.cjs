@@ -523,7 +523,7 @@ function createGoalController({
   }
   function requireBoundary() {
     if (disposed) throw goalError('disposed', '目标控制器已停用。');
-    if (!isEnabled()) throw goalError('disabled', '请先启用 Fusion BYOK。');
+    if (!isEnabled()) throw goalError('disabled', '请先启用 Fusion BYOK，并在控制面板的「目标」页打开目标模式。');
     if (!isTrusted()) throw goalError('untrusted', '当前工作区未受信任，不能启动或恢复目标。');
   }
   function goalOf(id) {

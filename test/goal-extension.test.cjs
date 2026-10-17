@@ -38,7 +38,7 @@ function fixture(t) {
   const root = path.join(directory, 'User/globalStorage/local.devin-fusion-byok'), extensionPath = path.join(directory, 'extension');
   fs.mkdirSync(root, { recursive: true }); fs.mkdirSync(extensionPath);
   const configFile = path.join(root, 'config.json');
-  fs.writeFileSync(configFile, JSON.stringify({ enabled: true, providers: [{ id: 'cpa', name: 'CPA', models: [] }] }));
+  fs.writeFileSync(configFile, JSON.stringify({ enabled: true, goalEnabled: true, providers: [{ id: 'cpa', name: 'CPA', models: [] }] }));
   const globals = { agentEnv: { 'devin-cli': {} }, agentPreferences: { 'devin-cli': { model: 'native-max' } } };
   const state = new Map(), commands = new Map(), logs = [], notices = [], watchers = [], preferenceListeners = [], subscriptions = [];
   const panels = [], posts = [];
@@ -240,5 +240,26 @@ test('an untrusted workspace refuses to start a goal, reports the error, and dis
   assert.equal(f.connector.sent.filter(request => request.method === 'session/prompt').length, 0, 'no prompt is sent while untrusted');
   const goalStore = realRequire('../src/runtime/goal-store.cjs');
   assert.equal(goalStore.readGoal(f.root, 's1'), null);
+  await f.deactivate();
+});
+test('goal mode stays off until the user turns it on: no /goal command, no goal starts', async t => {
+  const f = fixture(t);
+  fs.writeFileSync(f.configFile, JSON.stringify({ enabled: true, providers: [{ id: 'cpa', name: 'CPA', models: [] }] }));
+  await f.activate(f.context);
+  await f.settle();
+  f.api.registerConnection(f.connector);
+  await f.connector.sendRequest({ method: 'session/new', params: { sessionId: 's1' } });
+  const forwarded = f.connector.forwardClientRequest({ method: 'session/update', params: { sessionId: 's1',
+    update: { sessionUpdate: 'available_commands_update', availableCommands: [{ name: 'help', description: 'h' }] } } });
+  assert.equal(forwarded, 'fwd');
+  const advertised = f.connector.forwards.at(-1).params.update.availableCommands.map(command => command.name);
+  assert.deepEqual(advertised, ['help']);
+  await f.connector.sendRequest({ method: 'session/prompt', params: { sessionId: 's1', prompt: [{ type: 'text', text: '/goal ship it' }] } });
+  const prompt = f.connector.sent.filter(request => request.method === 'session/prompt').at(-1);
+  assert.equal(prompt.params.prompt[0].text, '/goal ship it', 'the message reaches the model unchanged');
+  await f.commands.get('devinFusionByok.goal')();
+  await f.settle();
+  await f.receive({ type: 'goal.ready', id: 'r1', payload: {} });
+  assert.equal(f.posts.filter(entry => entry.message.type === 'goal-state').at(-1).message.state.enabled, false);
   await f.deactivate();
 });

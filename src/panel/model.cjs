@@ -82,6 +82,7 @@ function publicState(config, selectedFusionUid, nativeModels = [], autoContinueS
     modelCount: Object.keys(catalog.routes).length,
     fusionCount: Object.keys(catalog.fusions).length,
     fusionChoices: Object.values(catalog.fusions).map(fusion => ({ uid: fusion.uid, label: fusion.label })),
+    goalEnabled: config.goalEnabled === true,
     autoContinueOnProviderError: config.autoContinueOnProviderError === true,
     autoContinueUntilPlanComplete: config.autoContinueUntilPlanComplete === true,
     autoContinueStatus: typeof autoContinueStatus === 'string' ? autoContinueStatus : 'unavailable',
@@ -267,6 +268,7 @@ function createManager({ read, write, discover = discoverModels, afterChange = a
         break;
       }
       case 'setEnabled': config.enabled = boolean(payload.enabled, '启用状态'); break;
+      case 'setGoalEnabled': config.goalEnabled = boolean(payload.enabled, '目标模式'); break;
       case 'setAutoContinue': config.autoContinueOnProviderError = boolean(payload.enabled, '自动继续'); break;
       case 'setAutoContinueUntilPlanComplete': config.autoContinueUntilPlanComplete = boolean(payload.enabled, '完成待办时自动继续'); break;
       default: fail('不支持的操作。');

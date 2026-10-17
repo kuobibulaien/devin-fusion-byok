@@ -2,9 +2,9 @@
 const { readKey } = require('./auth.cjs');
 const { authorize } = require('./web.cjs');
 
-// One-click authorization self-check for the control panel. It reads the local
-// Devin login, exchanges it for a short-lived user token and reads the account
-// policy. Only success/failure codes are kept; the credential is never returned.
+// Account check for the control panel. It reads the local Devin login, exchanges
+// it for a short-lived user token and reads the account policy. Only per-capability
+// booleans and a reason code are kept; the credential is never returned.
 const CHECK_MESSAGES = {
   ok: '已连接：代码搜索、网页搜索、网页读取三项能力都可以用。',
   web_search_disabled: '账号或团队关闭了网页搜索开关，网页搜索和网页读取暂时不能用；代码搜索不受影响。',
@@ -20,11 +20,15 @@ function createSelfCheck({ loadKey = readKey, verify = options => authorize(opti
   let result;
   async function run() {
     try {
-      await verify({ key: loadKey() });
-      result = { ok: true, reason: 'ok', at: Date.now() };
+      const { codeSearch = true, webSearch = false } = await verify({ key: loadKey() }) || {};
+      const ok = Boolean(codeSearch && webSearch);
+      result = { ok, reason: ok ? 'ok' : webSearch ? 'unavailable' : 'web_search_disabled',
+        capabilities: { code: Boolean(codeSearch), web: Boolean(webSearch) }, at: Date.now() };
     } catch (error) {
       const code = String(error?.message || '');
-      result = { ok: false, reason: KNOWN.has(code) ? code : 'unavailable', at: Date.now() };
+      const reason = KNOWN.has(code) && code !== 'ok' ? code : 'unavailable';
+      // A team ban only blocks code search when it is the reported reason; other failures leave both unknown.
+      result = { ok: false, reason, capabilities: { code: reason === 'fast_context_disabled' ? false : null, web: null }, at: Date.now() };
     }
     return result;
   }

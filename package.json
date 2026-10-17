@@ -2,7 +2,7 @@
   "name": "devin-fusion-byok",
   "displayName": "Devin Fusion BYOK",
   "description": "Import OpenAI- and Anthropic-compatible models into Devin Local and native Fusion through runtime bridges.",
-  "version": "0.3.43",
+  "version": "0.4.0",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -57,7 +57,7 @@
       },
       {
         "command": "devinFusionByok.fastContextMcp",
-        "title": "Fusion BYOK：Fast Context MCP 接入配置"
+        "title": "Fusion BYOK：对外提供 MCP 接入配置"
       },
       {
         "command": "devinFusionByok.goal",

@@ -8,6 +8,7 @@ const { search, options, parseAnswer } = require('../src/fast-context/search.cjs
 const { createSnapshot } = require('../src/fast-context/files.cjs');
 const { readKey, credentialPath } = require('../src/fast-context/auth.cjs');
 const { mcpConfig, registerFastContext } = require('../src/fast-context/config-ui.cjs');
+const { writeEnabled } = require('../src/fast-context/state.cjs');
 
 async function fixture(t) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'fc-engine-')));
@@ -132,6 +133,7 @@ test('config UI refuses untrusted workspace and does not alter harness files', a
   await handler(); assert.equal(warned, true);
 });
 test('config UI generates an unsaved document only after explicit confirmation', async () => {
+  const storage = await fs.mkdtemp(path.join(os.tmpdir(), 'fc-cmd-'));
   for (const confirmed of [true, false]) {
     let handler, document;
     const vscode = {
@@ -141,12 +143,22 @@ test('config UI generates an unsaved document only after explicit confirmation',
       window: { async showInformationMessage(text, ...args) { return args.length && confirmed ? '生成配置' : undefined; },
         async showTextDocument(value) { assert.equal(value, document); } },
     };
-    registerFastContext({ vscode, context: { extensionPath: '/plugin', subscriptions: [] } });
+    const warnings = [];
+    vscode.window.showWarningMessage = async text => { warnings.push(text); };
+    const context = { extensionPath: '/plugin', subscriptions: [], globalStorageUri: { fsPath: storage } };
+    registerFastContext({ vscode, context });
+    // Off by default: nothing is generated until the user enables it in the panel.
+    await fs.rm(path.join(storage, 'external-mcp.json'), { force: true });
+    await handler();
+    assert.equal(document, undefined);
+    assert.match(warnings[0], /还没有开启/);
+    writeEnabled(storage, true);
     await handler();
     if (confirmed) assert.deepEqual(JSON.parse(document.content).mcpServers['fusion-fast-context'].args,
-      ['/plugin/src/fast-context/server.cjs', '--root', '/project']);
+      [path.join(storage, 'fusion-mcp.cjs'), '--root', '/project']);
     else assert.equal(document, undefined);
   }
+  await fs.rm(storage, { recursive: true });
 });
 test('snippet truncation is explicit and returned ranges stay valid', async t => {
   const root = await fixture(t);
