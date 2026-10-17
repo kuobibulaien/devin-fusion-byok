@@ -70,7 +70,13 @@
 
 ## Fast Context MCP（实验性）
 
-把自然语言代码检索提供给其他支持 MCP 的 Harness：输入问题，返回相关文件、行号及代码片段。复用 Devin/Windsurf 的 Fast Context 检索接口，**不是普通关键词搜索，也不是另开一轮通用助手对话**。
+把 Devin 的三项检索能力提供给其他支持 MCP 的 Harness：
+
+- `fast_context_search`：自然语言代码检索，返回相关文件、行号和代码片段（复用 Fast Context 接口，**不是普通关键词搜索**）；
+- `web_search`：网页搜索，返回标题、地址和简短摘要；
+- `web_read_url`：读取一个公开 https 网页的正文文字。
+
+三项能力使用同一个 Devin 已登录账号，受账号与团队的网页搜索开关约束。
 
 打开 **Fusion BYOK 控制面板 → Fast Context** 标签页，选择允许搜索的项目，点 **复制提示词** 发给目标 Harness 里的 Agent，它会按提示词把 `fusion-fast-context` 合并进自己的 MCP 配置并验证；也可以 **复制配置 JSON** 手动合并，或在命令面板运行 **Fusion BYOK：Fast Context MCP 接入配置**。不要覆盖其他服务。插件升级后需重新复制，以更新安装路径。
 
@@ -92,7 +98,9 @@
 ```
 
 - 需要 **Node.js 22.16+（推荐 24 LTS）** 和 ripgrep；自动查找 PATH 或 macOS Devin 自带的 ripgrep，也可通过 `FUSION_FAST_CONTEXT_RG` 指定其绝对路径。不依赖正在运行的 Devin 窗口。
-- 提供 `fast_context_search`（`query`、`max_turns` 1–5、`max_results` 1–20、`include_content`）与 `fast_context_status`。默认最多三轮搜索、另一次最终答案请求；遇到模型格式错误，最多追加一次纠正请求，不猜测执行。每次搜索总时限 120 秒，同一 MCP 进程只接受一次搜索，支持取消。
+- 提供 `fast_context_search`（`query`、`max_turns` 1–5、`max_results` 1–20、`include_content`）、`web_search`（`query`、`limit` 1–20、可选 `domain`）、`web_read_url`（`url`，仅 https）与 `fast_context_status`。默认最多三轮搜索、另一次最终答案请求；遇到模型格式错误，最多追加一次纠正请求，不猜测执行。每次代码搜索总时限 120 秒，同一 MCP 进程同一时间只接受一次代码搜索，支持取消；网页调用互不阻塞，各自最长约 60 秒。
+- 网页搜索走官方接口；网页读取先由官方接口解析出最终地址，再在本机按同样的限制抓取正文并提取可读文字（不执行脚本、拒绝重定向、限制大小）。团队或账号关闭网页搜索时返回 `web_search_disabled`，不绕过。
+- 面板「一键鉴权」会读取本机 Devin 登录，向官方服务确认账号登录、代码检索、网页搜索三项是否可用，只显示结论，不显示也不保存凭证。
 - 使用本机 Devin 桌面的已有登录记录；也可由环境变量 `WINDSURF_API_KEY` 提供凭证。不把密钥写入生成的配置，不提供提取密钥工具。**使用官方账号权限及额度，不走 BYOK 供应商**；账号或团队禁用时直接报错。
 - 问题、目录信息和选中的代码片段会发往官方服务。只搜索启动时指定的项目；可追加 `--exclude pattern`。默认遵守 ignore 规则，并排除常见凭证文件、依赖、构建产物、软链接和硬链接。**这不是秘密识别器**：不要选择包含敏感内容的项目，额外排除私有目录。
 - 仅在内存中创建只读快照，不运行模型给出的 shell 命令，不写入项目。默认检查最多 3,000 个候选文件、8 MiB 文本、每文件 512 KiB、20 万行；被限制的结果明确标记 `partial`。读取失败、二进制等跳过数量另列。大仓库应选择更小的项目根目录。

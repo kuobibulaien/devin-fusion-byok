@@ -70,50 +70,53 @@ function parseCall(text) {
   }
   throw new Error('invalid_model_response');
 }
+// Single transport policy for every official call: fixed HTTPS origin, no
+// redirects, TLS never disabled, bounded responses, caller-cancellable.
+async function post(route, body, { signal, request = fetch, streaming = false } = {}) {
+  if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') throw new Error('insecure_tls_configuration');
+  signal?.throwIfAborted();
+  const timeout = AbortSignal.timeout(30000);
+  const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  const response = await request(ORIGIN + route, {
+    method: 'POST', redirect: 'error', signal: combined,
+    headers: { 'content-type': streaming ? 'application/connect+proto' : 'application/proto',
+      'connect-protocol-version': '1', 'user-agent': 'connect-go/1.18.1 (go1.25.5)',
+      ...(streaming ? { 'connect-content-encoding': 'gzip', 'connect-accept-encoding': 'gzip', 'connect-timeout-ms': '30000' } : {}) },
+    body: streaming ? frame(gzipSync(body), 1) : body,
+  });
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(response.status === 401 ? 'unauthenticated' : response.status === 403 ? 'permission_denied' :
+      response.status === 429 ? 'resource_exhausted' : 'upstream_http_' + response.status);
+  }
+  const chunks = []; let size = 0;
+  for await (const chunk of response.body) {
+    size += chunk.length;
+    if (size > MAX_RESPONSE) throw new Error('response_too_large');
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
 function createRemote({ key, signal, request = fetch }) {
   if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') throw new Error('insecure_tls_configuration');
   let jwt;
-  async function post(route, body, streaming = false) {
-    signal?.throwIfAborted();
-    const timeout = AbortSignal.timeout(30000);
-    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
-    const response = await request(ORIGIN + route, {
-      method: 'POST', redirect: 'error', signal: combined,
-      headers: { 'content-type': streaming ? 'application/connect+proto' : 'application/proto',
-        'connect-protocol-version': '1', 'user-agent': 'connect-go/1.18.1 (go1.25.5)',
-        ...(streaming ? { 'connect-content-encoding': 'gzip', 'connect-accept-encoding': 'gzip', 'connect-timeout-ms': '30000' } : {}) },
-      body: streaming ? frame(gzipSync(body), 1) : body,
-    });
-    if (!response.ok) {
-      await response.body?.cancel();
-      throw new Error(response.status === 401 ? 'unauthenticated' : response.status === 403 ? 'permission_denied' :
-        response.status === 429 ? 'resource_exhausted' : 'upstream_http_' + response.status);
-    }
-    const chunks = []; let size = 0;
-    for await (const chunk of response.body) {
-      size += chunk.length;
-      if (size > MAX_RESPONSE) throw new Error('response_too_large');
-      chunks.push(chunk);
-    }
-    return Buffer.concat(chunks);
-  }
   return {
     async authorize() {
-      const response = await post('/exa.auth_pb.AuthService/GetUserJwt', m(1, metadata(key)));
+      const response = await post('/exa.auth_pb.AuthService/GetUserJwt', m(1, metadata(key)), { signal, request });
       jwt = parseFields(response).filter(field => field.wire === 2).map(field => field.value.toString('utf8'))
         .find(value => /^eyJ[\w-]+\.[\w-]+\.[\w-]+$/.test(value));
       if (!jwt) throw new Error('unauthenticated');
       // Fail closed on account-policy lookup failures. Do not bypass team bans.
-      const settings = await post('/exa.seat_management_pb.SeatManagementService/GetCliTeamSettings', m(1, metadata(key, jwt)));
+      const settings = await post('/exa.seat_management_pb.SeatManagementService/GetCliTeamSettings', m(1, metadata(key, jwt)), { signal, request });
       if (num(settings, 3)) throw new Error('fast_context_disabled');
-      await post(API + 'CheckUserMessageRateLimit', Buffer.concat([m(1, metadata(key, jwt)), s(3, 'MODEL_SWE_1_6_FAST')]));
+      await post(API + 'CheckUserMessageRateLimit', Buffer.concat([m(1, metadata(key, jwt)), s(3, 'MODEL_SWE_1_6_FAST')]), { signal, request });
     },
     async complete(messages, tools) {
       if (!jwt) throw new Error('unauthenticated');
       const body = requestBody(key, jwt, messages, tools);
       if (body.length > 1024 * 1024) throw new Error('request_too_large');
-      return parseCall(parseStream(await post(API + 'GetDevstralStream', body, true)));
+      return parseCall(parseStream(await post(API + 'GetDevstralStream', body, { signal, request, streaming: true })));
     },
   };
 }
-module.exports = { metadata, requestBody, parseStream, parseCall, createRemote, ORIGIN, MAX_RESPONSE };
+module.exports = { metadata, requestBody, parseStream, parseCall, createRemote, post, ORIGIN, MAX_RESPONSE };

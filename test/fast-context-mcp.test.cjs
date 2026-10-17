@@ -23,7 +23,8 @@ test('MCP handshake, list, status, validation and safe errors', async t => {
   h.send('tools/call', { name: 'fast_context_search', arguments: { query: 'x', root: '/etc' } }, 4);
   h.send('tools/call', { name: 'fast_context_search', arguments: { query: 'x' } }, 5);
   await settle();
-  assert.deepEqual(h.messages.find(m => m.id === 2).result.tools.map(tool => tool.name), ['fast_context_search', 'fast_context_status']);
+  assert.deepEqual(h.messages.find(m => m.id === 2).result.tools.map(tool => tool.name),
+    ['fast_context_search', 'web_search', 'web_read_url', 'fast_context_status']);
   assert.equal(h.messages.find(m => m.id === 3).result.structuredContent.authentication, 'not_checked');
   assert.equal(h.messages.find(m => m.id === 4).error.code, -32602);
   assert.equal(h.messages.find(m => m.id === 5).result.isError, true);
@@ -89,5 +90,5 @@ test('packaged stdio entry handshakes in a separate process, stdout contains JSO
   assert.equal(code, 0, stderr);
   const messages = stdout.trim().split('\n').map(line => JSON.parse(line));
   assert.equal(messages[0].result.protocolVersion, '2025-03-26');
-  assert.equal(messages[1].result.tools.length, 2);
+  assert.equal(messages[1].result.tools.length, 4);
 });

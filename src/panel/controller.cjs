@@ -33,7 +33,10 @@ function createPanelController({ vscode, context, manager, safeError, updater, r
     if (!fastContext) { await post({ type: 'fast-context-result', ok: false, text: '当前环境不支持 Fast Context 配置。' }); return; }
     let selected;
     try {
-      if (message.type === 'fastContext.pick') selected = await fastContext.pick() || undefined;
+      if (message.type === 'fastContext.check') {
+        const result = await fastContext.selfCheck();
+        await post({ type: 'fast-context-result', ok: result.ok, text: fastContext.checkMessage(result.reason) });
+      } else if (message.type === 'fastContext.pick') selected = await fastContext.pick() || undefined;
       else if (message.type === 'fastContext.copy') {
         const kind = message.payload?.kind === 'config' ? 'config' : 'prompt';
         await fastContext.copy(kind, message.payload?.root);

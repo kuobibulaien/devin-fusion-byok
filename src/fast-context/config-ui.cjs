@@ -2,6 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { setupPrompt, NAME } = require('./setup-prompt.cjs');
+const { createSelfCheck } = require('./self-check.cjs');
 function mcpConfig({ extensionPath, root, node = 'node' }) {
   if (!path.isAbsolute(extensionPath) || !path.isAbsolute(root)) throw new Error('absolute_paths_required');
   return { mcpServers: { 'fusion-fast-context': {
@@ -17,7 +18,7 @@ function isDirectory(value) {
   try { return path.isAbsolute(value) && fs.statSync(value).isDirectory(); } catch { return false; }
 }
 // Panel host for the Fast Context tab. Roots are limited to open local folders plus folders the user picked here.
-function createFastContextHost({ vscode, context, resolve = resolveNode }) {
+function createFastContextHost({ vscode, context, resolve = resolveNode, check = createSelfCheck() }) {
   const picked = [];
   function roots() {
     const open = (vscode.workspace?.workspaceFolders || []).filter(folder => folder.uri?.scheme === 'file')
@@ -29,7 +30,7 @@ function createFastContextHost({ vscode, context, resolve = resolveNode }) {
   function state() {
     const node = resolve();
     return { trusted: vscode.workspace?.isTrusted !== false, roots: roots(), node, nodeFound: path.isAbsolute(node),
-      server: path.join(context.extensionPath, 'src/fast-context/server.cjs') };
+      server: path.join(context.extensionPath, 'src/fast-context/server.cjs'), check: check.state() };
   }
   function build(root) {
     if (typeof root !== 'string' || !roots().some(item => item.path === root)) throw new Error('fast_context_root_not_allowed');
@@ -52,7 +53,7 @@ function createFastContextHost({ vscode, context, resolve = resolveNode }) {
     if (picked.length > 10) picked.shift();
     return folder.fsPath;
   }
-  return { state, copy, pick, build };
+  return { state, copy, pick, build, selfCheck: check.run, checkMessage: check.message };
 }
 function registerFastContext({ vscode, context }) {
   const command = vscode.commands.registerCommand('devinFusionByok.fastContextMcp', async () => {
