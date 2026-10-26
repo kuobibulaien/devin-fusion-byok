@@ -8,6 +8,7 @@ const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
 const { createRequire } = require('node:module');
 const { runtimeIdentity, controlFile } = require('../src/runtime/backend.cjs');
+const { backendEnvironment } = require('../src/runtime/backend-env.cjs');
 const filename = path.resolve(__dirname, '../src/extension.cjs');
 const realRequire = createRequire(filename);
 const moduleUnderTest = { exports: {} };
@@ -21,7 +22,7 @@ const { ensureBackend, safeError } = moduleUnderTest.exports;
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'devin-manager-test-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const expected = { ...runtimeIdentity(root, true), instanceId: 'new-instance', managementProtocol: 1, activeRequests: 0, draining: false };
+  const expected = { ...runtimeIdentity(root, true, backendEnvironment(process.env)), instanceId: 'new-instance', managementProtocol: 1, activeRequests: 0, draining: false };
   const old = { ...expected, version: '0.0.1', sourceId: 'a'.repeat(64), instanceId: 'old-instance' };
   const token = 'b'.repeat(64), logs = [], spawns = [], waits = [];
   fs.writeFileSync(controlFile(root), JSON.stringify({ ...old, token }), { mode: 0o600 });

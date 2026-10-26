@@ -3,8 +3,45 @@
 const crypto = require('node:crypto');
 const { parseFields, str, num, s, v, m } = require('./protocol/wire.cjs');
 const { modelEfforts, modelSupportsImages } = require('./model-capabilities.cjs');
+const { modelChoices } = require('./model-choices.cjs');
 
 const OWN_GROUP = 'Devin Fusion BYOK';
+// Picker first page, when the user curated it. Devin's default sort shows the first
+// group made only of model routers (featured), then Pinned and Recently Used, then
+// the first other group; everything else needs search or "show all".
+const HOME_FUSION_GROUP = '首页 Fusion', HOME_MODEL_GROUP = '首页模型';
+const HOME_GROUPS = [HOME_FUSION_GROUP, HOME_MODEL_GROUP];
+const HOME_LIMIT = 50;
+function normalizeHomeModels(value) {
+  const result = [];
+  for (const uid of Array.isArray(value) ? value : []) {
+    if (typeof uid !== 'string' || !uid || uid.length > 256 || result.includes(uid)) continue;
+    result.push(uid);
+    if (result.length >= HOME_LIMIT) break;
+  }
+  return result;
+}
+// Resolves the curated uids against this response: own models from the catalog,
+// official ones from the entries the server just sent. Unknown or hidden uids drop out.
+function homeGroups(catalog, natives, hiddenLabels) {
+  const uids = catalog.homeModelUids || [];
+  if (!uids.length && !catalog.homeConfigured) return null;
+  const own = new Map();
+  for (const choice of modelChoices(catalog.models)) for (const variant of choice.variants) own.set(variant.uid, choice);
+  const official = new Map(natives.map(entry => [entry.uid, { label: entry.label, router: entry.isModelRouter === true }]));
+  const routers = [], plain = [], seen = new Set();
+  for (const uid of uids) {
+    const item = own.get(uid) || official.get(uid);
+    if (!item?.label || hiddenLabels.has(item.label)) continue;
+    const key = item.familyUid || uid;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    // Include every effort variant in the chosen family so curating one model
+    // never removes the native Effort control's other valid choices.
+    (item.kind === 'fusion' || item.router ? routers : plain).push(...(item.variants ? item.variants.map(variant => variant.modelLabel) : [item.label]));
+  }
+  return [{ name: HOME_FUSION_GROUP, labels: routers }, { name: HOME_MODEL_GROUP, labels: plain }].filter(group => group.labels.length);
+}
 const SIDEKICK_HARNESSES = ['swe-1p6', 'swe-1p5'];
 const ownUid = uid => typeof uid === 'string' && /^(?:dfbyok-|fusion-dfbyok-)/.test(uid);
 const has = (object, key) => Object.prototype.hasOwnProperty.call(object || {}, key);
@@ -463,7 +500,7 @@ function buildRoleLists(config = {}, nativeModels = []) {
 /** Build a secret-free catalog. Provider credentials stay solely in caller configuration. */
 function buildCatalog(config = {}, nativeModels = []) {
   if (config.enabled === false) {
-    return { models: [], routes: {}, fusions: {}, sidekicks: [], hiddenNativeModelUids: [], hiddenFusionUids: [] };
+    return { models: [], routes: {}, fusions: {}, sidekicks: [], hiddenNativeModelUids: [], hiddenFusionUids: [], homeModelUids: [] };
   }
   const models = [], routes = {}, fusions = {}, leads = [];
   const inferenceServerUrl = config.inferenceServerUrl || 'https://server.codeium.com';
@@ -633,7 +670,7 @@ function buildCatalog(config = {}, nativeModels = []) {
       ...(sidekick.native ? { sidekickHarnessUids: sidekick.harnessUids } : {}) };
   }
   return { models: [...presetModels, ...models], routes, fusions, sidekicks, hiddenNativeModelUids, hiddenFusionUids,
-    presetStates, savedPresets, migratedFrom,
+    homeModelUids: normalizeHomeModels(config.homeModels), homeConfigured: has(config, 'homeModels'), presetStates, savedPresets, migratedFrom,
     migrationPending: !Object.hasOwn(config, 'fusionPresets') && !!config.defaultFusionUid && !migratedFrom,
     presetCandidates: Object.fromEntries(Object.entries(candidates).map(([role, items]) => [role, items.map(item => ({ ref: item.ref, label: item.label }))])),
     defaultFusionUid: migratedFrom ? presetUid('legacy-default') : typeof config.defaultFusionUid === 'string' ? config.defaultFusionUid : undefined };
@@ -907,14 +944,17 @@ function augmentProtoList(data, catalog, hasSorts = true, onFusionStatus, onNati
   }
   for (const label of hiddenLabels) if (retainedLabels.has(label)) hiddenLabels.delete(label);
   const labels = models.map(model => model.label);
-  const groups = [{ name: '我的 Fusion', items: models.filter(model => model.kind === 'fusion') },
-    { name: OWN_GROUP, items: models.filter(model => model.kind !== 'fusion') }]
-    .filter(group => group.items.length).map(group => concat([s(1, group.name), ...group.items.map(model => s(2, model.label))]));
+  const home = homeGroups(catalog, nativeEntries(entries, false), hiddenLabels);
+  const groups = (home || [{ name: '我的 Fusion', labels: models.filter(model => model.kind === 'fusion').map(model => model.label) },
+    { name: OWN_GROUP, labels: models.filter(model => model.kind !== 'fusion').map(model => model.label) }])
+    .filter(group => group.labels.length).map(group => concat([s(1, group.name), ...group.labels.map(label => s(2, label))]));
   let sorts = 0;
   const result = preserved.map(field => {
     if (!hasSorts || field.number !== 2 || field.wire !== 2) return field.raw;
     sorts++;
     const parts = parseFields(field.value).filter(part => {
+      if (home !== null && part.number === 2 && part.wire === 2) return false;
+      if (part.number === 2 && part.wire === 2 && HOME_GROUPS.includes(str(part.value, 1))) return false;
       if (part.number !== 2 || part.wire !== 2 || ![OWN_GROUP, '我的 Fusion'].includes(str(part.value, 1))) return true;
       return !parseFields(part.value).filter(value => value.number === 2 && value.wire === 2)
         .every(value => existingLabels.has(value.value.toString('utf8')));
@@ -926,12 +966,12 @@ function augmentProtoList(data, catalog, hasSorts = true, onFusionStatus, onNati
       const kept = inner.filter(value => !(value.number === 2 && value.wire === 2 && hiddenLabels.has(value.value.toString('utf8'))));
       return kept.length === inner.length ? part : { raw: m(2, concat(kept.map(value => value.raw))) };
     });
-    if (labels.length) rewritten.splice(position < 0 ? rewritten.length : position, 0, ...groups.map(group => ({ raw: m(2, group) })));
+    if (groups.length) rewritten.splice(position < 0 ? rewritten.length : position, 0, ...groups.map(group => ({ raw: m(2, group) })));
     return m(2, concat(rewritten.map(part => part.raw)));
   });
   const own = models.map(model => m(1, model.raw));
   result.splice(Math.max(preserved.findIndex(field => field.number === 1 && field.wire === 2), 0), 0, ...own);
-  if (hasSorts && !sorts && labels.length) result.push(m(2, concat([s(1, OWN_GROUP), ...groups.map(group => m(2, group))])));
+  if (hasSorts && !sorts && groups.length) result.push(m(2, concat([s(1, OWN_GROUP), ...groups.map(group => m(2, group))])));
   return concat(result);
 }
 
@@ -967,18 +1007,20 @@ function augmentJsonList(data, catalog, hasSorts = true, onFusionStatus, onNativ
     kept.push(model);
   }
   for (const label of hiddenLabels) if (retainedLabels.has(label)) hiddenLabels.delete(label);
-  const groups = [{ groupName: '我的 Fusion', modelLabels: models.filter(model => model.kind === 'fusion').map(model => model.label) },
-    { groupName: OWN_GROUP, modelLabels: models.filter(model => model.kind !== 'fusion').map(model => model.label) }].filter(group => group.modelLabels.length);
-  const append = sort => ({ ...sort, groups: [...groups, ...(sort.groups || []).map(value => {
+  const home = homeGroups(catalog, nativeEntries(existing, true), hiddenLabels);
+  const groups = (home ? home.map(group => ({ groupName: group.name, modelLabels: group.labels })) :
+    [{ groupName: '我的 Fusion', modelLabels: models.filter(model => model.kind === 'fusion').map(model => model.label) },
+      { groupName: OWN_GROUP, modelLabels: models.filter(model => model.kind !== 'fusion').map(model => model.label) }]).filter(group => group.modelLabels.length);
+  const append = sort => ({ ...sort, groups: home !== null ? groups : [...groups, ...(sort.groups || []).map(value => {
     const labelsKey = has(value, 'modelLabels') ? 'modelLabels' : has(value, 'model_labels') ? 'model_labels' : '';
     if (!labelsKey || !Array.isArray(value[labelsKey]) || !hiddenLabels.size) return value;
     const keptLabels = value[labelsKey].filter(label => !hiddenLabels.has(label));
     return keptLabels.length === value[labelsKey].length ? value : { ...value, [labelsKey]: keptLabels };
-  }).filter(value =>
+  }).filter(value => !HOME_GROUPS.includes(value.groupName ?? value.group_name)).filter(value =>
     ![OWN_GROUP, '我的 Fusion'].includes(value.groupName ?? value.group_name) || !(value.modelLabels ?? value.model_labels ?? []).every(label => existingLabels.has(label)))] });
   return { ...data,
     [modelsKey]: [...models.map(model => structuredClone(model.json)), ...kept],
-    ...(hasSorts ? { [sortsKey]: sorts.length ? sorts.map(append) : (labels.length ? [{ name: OWN_GROUP, groups }] : sorts) } : {}),
+    ...(hasSorts ? { [sortsKey]: sorts.length ? sorts.map(append) : (groups.length ? [{ name: OWN_GROUP, groups }] : sorts) } : {}),
   };
 }
 
@@ -987,7 +1029,7 @@ function augmentCatalog(data, { rpc, format = {}, catalog, onFusionStatus, onNat
   if (rpc === '/exa.seat_management_pb.SeatManagementService/GetCliTeamSettings') return augmentLocalModelChoices(data, format, catalog);
   const shape = rpcShape(rpc);
   if (!shape || !catalog) return data;
-  if (!catalog.models?.length && !catalog.hiddenNativeModelUids?.length && !catalog.hiddenFusionUids?.length &&
+  if (!catalog.models?.length && !catalog.hiddenNativeModelUids?.length && !catalog.hiddenFusionUids?.length && !catalog.homeModelUids?.length && !catalog.homeConfigured &&
       typeof onFusionStatus !== 'function' && typeof onNativeModels !== 'function') return data;
   try {
     if (format.json === true) {
@@ -1112,4 +1154,4 @@ function resolveAssignment(data, format = {}, catalog, lockedFusionUids) {
   } catch { return null; }
 }
 
-module.exports = { buildCatalog, augmentCatalog, resolveAssignment, collectNativeModels, buildRoleLists, refKey, presetUid, normalizeFusionConfig };
+module.exports = { buildCatalog, augmentCatalog, normalizeHomeModels, HOME_GROUPS, resolveAssignment, collectNativeModels, buildRoleLists, refKey, presetUid, normalizeFusionConfig };

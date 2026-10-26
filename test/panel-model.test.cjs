@@ -33,6 +33,7 @@ function memory(options = {}) {
     selectFusion: async uid => { selections.push(uid); selected = uid; },
     selectedFusion: () => selected,
     nativeModels: options.nativeModels || (() => []),
+    nativePicker: options.nativePicker,
   });
   return { manager, writes, changes, selections,
     read: () => structuredClone(config),
@@ -113,7 +114,7 @@ test('manual models support independent display names, image support, limits, an
   const added = f.read().providers[1].models.find(m => m.id === 'manual-model');
   assert.deepEqual(added, model('manual-model', { label: 'Custom', source: 'manual', supportsImages: true,
     contextWindow: 500000, maxOutputTokens: 32000, efforts: ['low', 'high'] }));
-  assert.equal(f.manager.state().modelCount, 5);
+  assert.equal(f.manager.state().modelCount, 4);
   await f.manager.dispatch('addModel', { providerId: 'other', model: { id: 'manual-off', supportsImages: false } });
   assert.equal(f.read().providers[1].models.find(m => m.id === 'manual-off').supportsImages, true);
   const before = f.read();
@@ -412,8 +413,8 @@ test('native model hide and restore persist a validated exclusion list with obse
   const f = memory({ nativeModels: () => observed });
   let state = await f.manager.dispatch('ready');
   assert.deepEqual(state.nativeModels, [
-    { uid: 'swe-2-max', label: 'Official SWE', disabled: false, hidden: false, eligibleLead: false, eligibleSidekick: false, eligible: false },
-    { uid: 'claude-x', label: 'Claude X', disabled: true, hidden: false, eligibleLead: false, eligibleSidekick: false, eligible: false },
+    { uid: 'swe-2-max', label: 'Official SWE', disabled: false, hidden: false, router: false, eligibleLead: false, eligibleSidekick: false, eligible: false },
+    { uid: 'claude-x', label: 'Claude X', disabled: true, hidden: false, router: false, eligibleLead: false, eligibleSidekick: false, eligible: false },
   ]);
   state = await f.manager.dispatch('setNativeModelHidden', { uid: 'swe-2-max', hidden: true });
   assert.deepEqual(f.read().hiddenNativeModelUids, ['swe-2-max']);
@@ -539,4 +540,44 @@ test('officially paired and standalone unlocked natives are offered and accepted
     const disabled = observed.map(item => item.uid === 'swe-odd' ? { ...item, disabled: true } : item);
     assert.equal(publicState(fixture(), '', disabled).nativeModels.find(entry => entry.uid === 'swe-odd').eligible, false);
   });
+});
+
+test('first-page list keeps order, offers every own and visible official model, and clears to default', async () => {
+  const observed = [{ uid: 'official-plain', label: 'Official Plain', disabled: false, isModelRouter: false },
+    { uid: 'official-router', label: 'Official Router', disabled: false, isModelRouter: true },
+    { uid: 'official-off', label: 'Off', disabled: true }];
+  const f = memory({ nativeModels: () => observed });
+  let state = await f.manager.dispatch('ready');
+  assert.deepEqual(state.homeModels, []);
+  assert.deepEqual(state.homeCandidates.filter(item => item.kind.startsWith('official')).map(item => [item.uid, item.kind]),
+    [['official-plain', 'official'], ['official-router', 'official-fusion'], ['official-off', 'official']]);
+  state = await f.manager.dispatch('setHomeModels', { uids: ['official-router', 'gone', 'official-plain', 'official-router'] });
+  assert.deepEqual(f.read().homeModels, ['official-router', 'gone', 'official-plain']);
+  assert.deepEqual(state.homeModels.map(item => [item.uid, item.available]), [['official-router', true], ['gone', false], ['official-plain', true]]);
+  for (const bad of [null, 'x', [1], [''], Array.from({ length: 51 }, (_, i) => 'm' + i)]) {
+    await assert.rejects(f.manager.dispatch('setHomeModels', { uids: bad }), /首页模型/);
+  }
+  await f.manager.dispatch('setHomeModels', { uids: [] });
+  assert.deepEqual(f.read().homeModels, []);
+  assert.equal(f.manager.state().homeCustomized, true);
+  await f.manager.dispatch('resetHomeModels');
+  assert.ok(!Object.hasOwn(f.read(), 'homeModels'));
+});
+
+test('native first-page editing exposes grey pins and never changes provider settings or account availability', async () => {
+  const { createNativePickerStore, listValue, readList } = require('../src/runtime/native-picker.cjs');
+  const data = { pinnedCascadeModelUids: ['swe-2-max', 'swe-2-high'], lastSelectedCascadeModelUids: ['swe-2-max'] };
+  const picker = createNativePickerStore({ request: async (method, params) => {
+    if (method === 'GetNativeValues') return { values: Object.fromEntries(Object.entries(data).map(([key, uids]) => [key, { value: listValue(uids) }])) };
+    data[params.key] = readList(params.value); return { currentValue: { value: listValue(data[params.key]) } };
+  } });
+  const observed = [{ uid: 'swe-2-max', label: 'SWE-2 Max', disabled: true }, { uid: 'swe-2-high', label: 'SWE-2 High', disabled: true }];
+  const f = memory({ nativeModels: () => observed, nativePicker: picker });
+  let state = await f.manager.dispatch('ready');
+  assert.deepEqual(state.nativePicker.pinned.map(item => [item.label, item.disabled, item.available]), [['SWE-2 Max', true, false], ['SWE-2 High', true, false]]);
+  state = await f.manager.dispatch('setPickerList', { kind: 'pinned', uids: [], revision: state.nativePicker.revision });
+  assert.deepEqual(state.nativePicker.pinned, []);
+  assert.deepEqual(state.nativePicker.recent.map(item => item.uid), ['swe-2-max']);
+  assert.equal(f.writes.length, 0);
+  assert.ok(state.nativeModels.every(item => item.disabled));
 });

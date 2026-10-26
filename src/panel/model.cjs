@@ -1,8 +1,9 @@
 'use strict';
 const { randomUUID } = require('node:crypto');
-const { buildCatalog, buildRoleLists, refKey, presetUid, normalizeFusionConfig } = require('../catalog.cjs');
+const { buildCatalog, buildRoleLists, refKey, presetUid, normalizeFusionConfig, normalizeHomeModels } = require('../catalog.cjs');
 const { discover: discoverModels } = require('../config.cjs');
 const { modelSupportsImages } = require('../model-capabilities.cjs');
+const { modelChoices, presetChoices, uniqueModelUids } = require('../model-choices.cjs');
 const { normalizeBaseUrlPath } = require('./base-url.cjs');
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
 class PanelInputError extends Error {}
@@ -46,7 +47,35 @@ function cleanSidekicks(config) {
       provider.models.some(model => model.id === sidekick?.model && model.enabled !== false)));
   config.sidekicks = valid;
 }
-function publicState(config, selectedFusionUid, nativeModels = [], autoContinueStatus = 'unavailable') {
+// Picker first page: every own Fusion, BYOK model and visible official model can be
+// chosen; uids the catalog cannot resolve right now stay listed as unavailable.
+function homeState(catalog, natives, picker) {
+  const choices = modelChoices(catalog.models);
+  const candidates = [
+    ...choices.map(({ uid, label, kind }) => ({ uid, label, kind })),
+    ...natives.filter(model => !model.hidden).map(model => ({ uid: model.uid, label: model.label, disabled: model.disabled, kind: model.router ? 'official-fusion' : 'official' })),
+  ];
+  const known = new Map([...natives.map(model => ({ uid: model.uid, label: model.label, disabled: model.disabled, hidden: model.hidden,
+    kind: model.router ? 'official-fusion' : 'official' })), ...candidates].map(item => [item.uid, item]));
+  for (const choice of choices) for (const variant of choice.variants) known.set(variant.uid, { uid: choice.uid, label: choice.label, kind: choice.kind });
+  const resolve = uid => known.get(uid) ? { ...known.get(uid), available: !known.get(uid).disabled } : { uid, label: uid, kind: 'unknown', available: false };
+  const resolveList = (uids, native = false) => {
+    const rows = new Map();
+    for (const uid of uids) {
+      const item = resolve(uid), existing = rows.get(item.uid);
+      if (existing) { if (native) existing.uids.push(uid); }
+      else rows.set(item.uid, { ...item, ...(native ? { uids: [uid] } : {}) });
+    }
+    return [...rows.values()];
+  };
+  return { homeCandidates: candidates,
+    homeCustomized: catalog.homeConfigured === true,
+    homeModels: resolveList(catalog.homeModelUids || []),
+    homeDefaults: choices.map(model => resolve(model.uid)),
+    nativePicker: { status: picker?.status || 'waiting', revision: picker?.revision || '', needsReload: picker?.needsReload === true,
+      pinned: resolveList(picker?.pinned || [], true), recent: resolveList(picker?.recent || [], true) } };
+}
+function publicState(config, selectedFusionUid, nativeModels = [], autoContinueStatus = 'unavailable', picker) {
   const catalog = buildCatalog({ ...config, enabled: true }, nativeModels);
   const hidden = new Set(catalog.hiddenNativeModelUids || []);
   const roleLists = buildRoleLists(config, nativeModels);
@@ -58,7 +87,7 @@ function publicState(config, selectedFusionUid, nativeModels = [], autoContinueS
     if (!entry || typeof entry.uid !== 'string' || !entry.uid) continue;
     observed.add(entry.uid);
     natives.push({ uid: entry.uid, label: typeof entry.label === 'string' && entry.label ? entry.label : entry.uid,
-      disabled: entry.disabled === true, hidden: hidden.has(entry.uid),
+      disabled: entry.disabled === true, hidden: hidden.has(entry.uid), router: entry.isModelRouter === true,
       eligibleLead: eligibleLeads.has(entry.uid), eligibleSidekick: eligibleSidekicks.has(entry.uid),
       eligible: eligibleLeads.has(entry.uid) || eligibleSidekicks.has(entry.uid) });
   }
@@ -75,25 +104,26 @@ function publicState(config, selectedFusionUid, nativeModels = [], autoContinueS
       ? { nativeUid: sidekick.uid, label: sidekick.label } : { providerId: sidekick.providerId, model: sidekick.model }),
     roleLists,
     fusionPresets: catalog.presetStates || [],
-    presetCandidates: catalog.presetCandidates || { lead: [], sidekick: [] },
+    presetCandidates: Object.fromEntries(Object.entries(catalog.presetCandidates || { lead: [], sidekick: [] }).map(([role, items]) => [role, presetChoices(items, catalog)])),
     migrationPending: !!catalog.migrationPending,
     selectedFusionUid: catalog.migratedFrom === selectedFusionUid ? catalog.defaultFusionUid : selectedFusionUid,
     nativeModels: natives,
-    modelCount: Object.keys(catalog.routes).length,
+    modelCount: modelChoices(catalog.models).filter(model => model.kind === 'model').length,
     fusionCount: Object.keys(catalog.fusions).length,
     fusionChoices: Object.values(catalog.fusions).map(fusion => ({ uid: fusion.uid, label: fusion.label })),
     goalEnabled: config.goalEnabled === true,
+    ...homeState(catalog, natives, picker),
     autoContinueOnProviderError: config.autoContinueOnProviderError === true,
     autoContinueUntilPlanComplete: config.autoContinueUntilPlanComplete === true,
     autoContinueStatus: typeof autoContinueStatus === 'string' ? autoContinueStatus : 'unavailable',
   };
 }
-function createManager({ read, write, discover = discoverModels, afterChange = async () => {}, selectFusion = async () => {}, selectedFusion = () => '', nativeModels = () => [], refreshNativeModels = async () => {}, nativeCatalogStatus = () => 'empty', autoContinueStatus = () => 'unavailable' }) {
+function createManager({ read, write, discover = discoverModels, afterChange = async () => {}, selectFusion = async () => {}, selectedFusion = () => '', nativeModels = () => [], refreshNativeModels = async () => {}, nativeCatalogStatus = () => 'empty', autoContinueStatus = () => 'unavailable', nativePicker }) {
   let queue = Promise.resolve();
   let pendingImport;
   const signature = provider => JSON.stringify([provider.id, provider.baseUrl, provider.apiFormat, provider.apiKey]);
   const state = () => {
-    const config = read(), result = publicState(config, selectedFusion(), nativeModels(), autoContinueStatus());
+    const config = read(), result = publicState(config, selectedFusion(), nativeModels(), autoContinueStatus(), nativePicker?.snapshot());
     result.nativeCatalogStatus = nativeCatalogStatus();
     const provider = config.providers.find(p => p.id === pendingImport?.providerId);
     result.importCandidates = provider && signature(provider) === pendingImport.signature ? {
@@ -105,7 +135,33 @@ function createManager({ read, write, discover = discoverModels, afterChange = a
   };
   async function apply(type, payload = {}) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) fail('操作参数无效。');
-    if (type === 'ready' || type === 'refreshNativeModels') { await refreshNativeModels(); return state(); }
+    if (type === 'ready' || type === 'refreshNativeModels' || type === 'refreshPicker') {
+      await Promise.all([refreshNativeModels(), nativePicker?.refresh()]); return state();
+    }
+    if (type === 'normalizePickerModels') {
+      // Pinned intentionally skips native family deduplication. Consolidate our
+      // duplicate effort pins only on the user's explicit Apply action.
+      if (read().enabled === false || !nativePicker) return state();
+      const snapshot = await nativePicker.refresh();
+      if (snapshot.status !== 'ready') return state();
+      const uids = uniqueModelUids(snapshot.pinned, buildCatalog(read(), nativeModels()).models);
+      if (uids.length !== snapshot.pinned.length) {
+        try { await nativePicker.setList('pinned', uids, snapshot.revision); }
+        catch { fail('置顶列表已变化或暂不可用，请同步后再应用。'); }
+      }
+      return state();
+    }
+    if (type === 'setPickerList') {
+      if (read().enabled === false) fail('请先启用插件。');
+      if (!nativePicker) fail('尚未连接当前窗口的原生模型列表，请重新加载一次窗口。');
+      try { await nativePicker.setList(payload.kind, payload.uids, payload.revision); }
+      catch (error) {
+        const messages = { picker_invalid_list: '置顶或最近使用列表无效。', picker_conflict: 'Devin 的列表刚刚发生了变化，已重新同步，请再试一次。',
+          picker_unavailable: '暂时无法读取 Devin 原生列表，请稍后同步重试。', picker_write_unverified: '原生列表保存后未能核对，请先同步再操作。' };
+        fail(messages[error?.code] || '无法保存原生列表，请先同步再重试。');
+      }
+      return state();
+    }
     let config = normalizeFusionConfig(read(), nativeModels());
     if (type === 'selectFusion') {
       if (config.enabled === false) fail('请先启用 Fusion BYOK。');
@@ -268,6 +324,13 @@ function createManager({ read, write, discover = discoverModels, afterChange = a
         break;
       }
       case 'setEnabled': config.enabled = boolean(payload.enabled, '启用状态'); break;
+      case 'setHomeModels': {
+        const uids = payload?.uids;
+        if (!Array.isArray(uids) || uids.length > 50 || uids.some(uid => typeof uid !== 'string' || !uid || uid.length > 256)) fail('首页模型列表无效。');
+        config.homeModels = normalizeHomeModels(uids);
+        break;
+      }
+      case 'resetHomeModels': delete config.homeModels; break;
       case 'setGoalEnabled': config.goalEnabled = boolean(payload.enabled, '目标模式'); break;
       case 'setAutoContinue': config.autoContinueOnProviderError = boolean(payload.enabled, '自动继续'); break;
       case 'setAutoContinueUntilPlanComplete': config.autoContinueUntilPlanComplete = boolean(payload.enabled, '完成待办时自动继续'); break;

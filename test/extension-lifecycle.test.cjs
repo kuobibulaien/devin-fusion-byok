@@ -22,7 +22,7 @@ function fixture(t, initial = {}) {
   const globals = { agentEnv: { 'devin-cli': { KEEP: 'user-value' } }, agentPreferences: { 'devin-cli': { model: 'native-max', effort: 'high' } }, ...initial.globals };
   const state = new Map(Object.entries(initial.state || {})), commands = new Map(), logs = [], notices = [], watchers = [], preferenceListeners = [];
   const updates = [], bridges = [];
-  let disposed = 0, installed = 0, managerOptions;
+  let disposed = 0, installed = 0, managerOptions, hostOptions, hostRefreshes = 0;
   const settings = {
     inspect: key => ({ globalValue: globals[key] }),
     get: () => { throw new Error('Merged workspace settings must not be copied into global settings'); },
@@ -30,7 +30,7 @@ function fixture(t, initial = {}) {
   };
   const vscode = {
     ConfigurationTarget: { Global: 1 },
-    workspace: { getConfiguration: () => settings,
+    workspace: { getConfiguration: section => section === 'http' ? { get: () => initial.httpProxy || '' } : settings,
       onDidChangeConfiguration: fn => { preferenceListeners.push(fn); return { dispose() {} }; } },
     extensions: { getExtension: () => ({ extensionPath: '/native', packageJSON: { main: 'main.js', version: 'test' } }) },
     commands: { registerCommand: (id, fn) => { commands.set(id, fn); return { dispose() {} }; } },
@@ -61,6 +61,10 @@ function fixture(t, initial = {}) {
     './catalog.cjs': { normalizeFusionConfig: config => config, buildCatalog: config => ({ models: config.providers?.length ? ['own'] : [],
       fusions: config.providers?.length ? { 'fusion-dfbyok-selected': { label: 'CPA Fusion' }, 'fusion-dfbyok-another': { label: 'CPA Fusion Alt' } } : {} }) },
     './runtime/native-models.cjs': { readNativeModels: options => nativeRead(options) },
+    './runtime/host-catalog.cjs': { installHostCatalog: options => {
+      hostOptions = options;
+      return { refresh: async () => { hostRefreshes++; }, dispose() {} };
+    } },
     './runtime/backend.cjs': { runtimeIdentity: () => identity, controlFile: actualBackend.controlFile, PORT: 39842, MANAGEMENT_PROTOCOL: 1 },
     './runtime/bridge.cjs': { createLsBridge: async (_port, options) => { bridges.push(options); return { port: 4567, close() {} }; } },
     './runtime/ls-injection.cjs': { installLsInjection: async options => {
@@ -89,8 +93,22 @@ function fixture(t, initial = {}) {
     gateInjection: () => { let release; injectionGate = new Promise(resolve => { release = resolve; }); return release; },
     firePreference: (key = 'devin.acp.agentPreferences') => Promise.all(preferenceListeners.map(fn => fn({ affectsConfiguration: name => name === key }))),
     settle: async (ticks = 20) => { for (let index = 0; index < ticks; index++) await next(); },
-    counts: () => ({ installed, disposed }) };
+    counts: () => ({ installed, disposed }), host: () => ({ options: hostOptions, refreshes: hostRefreshes }) };
 }
+test('activation and home edits refresh the host catalog, and disabled/unloaded hooks stop injecting', async t => {
+  const f = fixture(t); await f.activate(f.context);
+  assert.equal(f.host().options.nativeMainPath, '/native/main.js');
+  assert.equal(f.host().options.isEnabled(), true);
+  assert.equal(f.host().options.getCatalog().models.length, 1);
+  assert.equal(f.host().refreshes, 1);
+  await f.managerOptions().afterChange('setHomeModels');
+  assert.equal(f.host().refreshes, 2);
+  await f.commands.get('devinFusionByok.disable')();
+  assert.equal(f.host().options.isEnabled(), false);
+  assert.equal(f.host().refreshes, 3);
+  await f.deactivate();
+  assert.equal(f.host().options.isEnabled(), false);
+});
 test('normal window unload restores its LS hook without reverting shared CLI environment', async t => {
   const f = fixture(t); await f.activate(f.context);
   assert.equal(f.counts().installed, 1);
@@ -303,6 +321,28 @@ const oldRuntimeHealth = idle => ({ service: 'devin-fusion-byok', version: '0.1.
   instanceId: 'old-1', managementProtocol: 1, activeRequests: idle ? 0 : 4, draining: false });
 const newRuntimeHealth = { service: 'devin-fusion-byok', version: '0.2.0', sourceId: 'expected', rootId: 'root',
   instanceId: 'new-1', managementProtocol: 1, activeRequests: 0, draining: false };
+test('a same-version runtime with a different proxy is replaced after idle using the editor proxy', async t => {
+  const f = fixture(t, { httpProxy: 'http://127.0.0.1:7897' });
+  const old = { ...newRuntimeHealth, networkId: 'previous-network', instanceId: 'previous-network-runtime' };
+  fs.writeFileSync(actualBackend.controlFile(f.root), JSON.stringify({ ...old, token: 'c'.repeat(64) }), { mode: 0o600 });
+  let busy = true, shutdowns = 0, gone = false;
+  f.setFetch(async url => {
+    if (url.endsWith('/_runtime/shutdown')) { shutdowns++; return new Response('{"stopping":true}'); }
+    if (busy) return new Response(JSON.stringify({ ...old, activeRequests: 1 }));
+    if (!shutdowns) return new Response(JSON.stringify(old));
+    if (!gone) { gone = true; throw new Error('Connection refused'); }
+    return new Response(JSON.stringify(newRuntimeHealth));
+  });
+  await f.activate(f.context);
+  assert.equal(shutdowns, 0, 'active model requests are preserved');
+  assert.equal(f.spawns.length, 0);
+  busy = false;
+  await f.settle(80);
+  assert.equal(shutdowns, 1);
+  assert.equal(f.spawns.length, 1);
+  assert.equal(f.spawns[0].options.env.HTTPS_PROXY, 'http://127.0.0.1:7897/');
+  assert.equal(f.spawns[0].options.env.NODE_USE_ENV_PROXY, '1');
+});
 test('a busy older runtime lets activation finish and upgrades in the background once it idles', async t => {
   const f = fixture(t);
   fs.writeFileSync(actualBackend.controlFile(f.root), JSON.stringify({ ...oldRuntimeHealth(true), token: 'b'.repeat(64) }), { mode: 0o600 });

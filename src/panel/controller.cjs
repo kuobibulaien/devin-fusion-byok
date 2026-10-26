@@ -26,6 +26,9 @@ function createPanelController({ vscode, context, manager, safeError, updater, r
   };
   const publishUpdates = () => panel && updater ? panel.webview.postMessage({ type: 'update-state', state: updater.snapshot() }) : undefined;
   const publish = () => panel ? postState(panel, manager.state()) : undefined;
+  const publishPicker = () => panel ? panel.webview.postMessage({ type: 'picker-state', state: (() => {
+    const state = manager.state(); return { homeModels: state.homeModels, homeCustomized: state.homeCustomized, homeDefaults: state.homeDefaults, homeCandidates: state.homeCandidates, nativePicker: state.nativePicker };
+  })() }) : undefined;
   const FAST_CONTEXT_ERRORS = { fast_context_root_not_allowed: '只能选择已打开的项目或在此处选择的文件夹。',
     fast_context_root_missing: '该文件夹不存在或无法访问，请重新选择。', fast_context_untrusted: '请先信任工作区，再复制 Fast Context 配置。',
     fast_context_check_required: '请先检测账号，确认代码搜索可用后再开启。', fast_context_not_enabled: '对外 MCP 还没有开启。',
@@ -70,6 +73,14 @@ function createPanelController({ vscode, context, manager, safeError, updater, r
       if (message.type === 'monitor.refresh') { await refreshMonitor(); return; }
       if (message.type.startsWith('fastContext.')) { await handleFastContext(current, message); return; }
       try {
+        if (message.type === 'picker.reload') {
+          // The native React storage provider has no external state subscription.
+          // Reload only after the explicitly labelled panel action is clicked.
+          await manager.dispatch('normalizePickerModels');
+          await current.webview.postMessage({ type: 'result', id: message.id, ok: true });
+          await vscode.commands.executeCommand('workbench.action.reloadWindow');
+          return;
+        }
         if (message.type === 'app.restart') {
           if (typeof restartApp !== 'function') throw new PanelInputError('当前环境不支持重启 Devin。');
           const choice = await vscode.window.showWarningMessage('重启 Devin 会关闭所有窗口，并中断正在进行的对话。确定现在重启吗？', { modal: true }, '重启');
@@ -109,6 +120,6 @@ function createPanelController({ vscode, context, manager, safeError, updater, r
     const closing = panel.onDidDispose(() => { clearInterval(timer); messages.dispose(); closing.dispose(); if (panel === current) panel = undefined; });
   }
   context.subscriptions.push({ dispose() { disposed = true; panel?.dispose(); } });
-  return { open, publish, publishUpdates };
+  return { open, publish, publishUpdates, publishPicker };
 }
 module.exports = { createPanelController };

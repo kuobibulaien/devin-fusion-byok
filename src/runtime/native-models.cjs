@@ -4,8 +4,17 @@ const { runtimeIdentity, controlFile, PORT } = require('./backend.cjs');
 async function readNativeModels({ root, port = PORT, signal, request = fetch }) {
   const timeout = signal ? AbortSignal.any([signal, AbortSignal.timeout(2000)]) : AbortSignal.timeout(2000);
   const base = 'http://127.0.0.1:' + port;
+  // A pooled keep-alive socket to a runtime that just restarted on the same port
+  // fails once with a reset; these GETs are idempotent, so retry that case once.
+  const send = async (url, headers) => {
+    try { return await request(url, { signal: timeout, headers, redirect: 'error' }); }
+    catch (error) {
+      if (timeout.aborted || !/ECONNRESET|socket hang up|other side closed/i.test(String(error?.cause?.code || error?.cause?.message || error?.message))) throw error;
+      return request(url, { signal: timeout, headers, redirect: 'error' });
+    }
+  };
   const read = async (url, headers) => {
-    const response = await request(url, { signal: timeout, headers, redirect: 'error' });
+    const response = await send(url, headers);
     if (!response.ok) throw new Error('native_catalog_unavailable');
     const chunks = []; let size = 0;
     for await (const chunk of response.body) {

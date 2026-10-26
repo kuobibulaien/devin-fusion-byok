@@ -33,7 +33,7 @@ function panel() {
   const byId = id => { if (!elements.has(id)) elements.set(id, new Element('div')); return elements.get(id); };
   const createElement = tag => {
     const node = new Element(tag);
-    node.setAttribute = (key, value) => { node.attributes[key] = value; if (key === 'id' && !elements.has(value)) elements.set(value, node); };
+    node.setAttribute = (key, value) => { node.attributes[key] = value; if (key === 'id') elements.set(value, node); };
     return node;
   };
   const document = { getElementById: byId, createElement, createTextNode: text => ({ textContent: text }),
@@ -100,4 +100,11 @@ test('deleting a model lives in its edit dialog', () => {
   assert.equal(collect(byId('models'), 'button', node => node.textContent === '删除').length, 0, 'rows carry no delete button');
   collect(byId('models'), 'button', node => String(node.attributes['aria-label'] || '').startsWith('编辑模型'))[0].listeners.click();
   assert.equal(collect(byId('editor-dialog'), 'button', node => node.textContent === '删除').length, 1);
+});
+
+test('settings offer an editable picker first page with reorder, remove, add and reset', () => {
+  const { renderPanel } = require('../src/panel/view.cjs');
+  const html = renderPanel({ nonce: 'safe', cspSource: 'test:' });
+  assert.match(html, /<details id="home-group" class="group" open><summary>选择器第一页/);
+  for (const text of ["request('setHomeModels', { uids })", "'上移'", "'下移'", "'移除'", "'添加到首页'", "'恢复默认'"]) assert.ok(html.includes(text), text);
 });

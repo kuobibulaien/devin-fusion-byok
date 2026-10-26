@@ -222,4 +222,4 @@ async function installLsInjection({ nativeMainPath, createBridge, log = () => {}
   return handle;
 }
 
-module.exports = { installLsInjection };
+module.exports = { installLsInjection, heartbeatPort };

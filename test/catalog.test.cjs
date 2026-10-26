@@ -939,3 +939,65 @@ test('order and uid claim conflicts poison both the uids and the contested order
     'unpaired swe-2-max cannot join sidekicks without an official pairing');
   assert.ok(maxModel && uidConflict.sidekicks.find(item => item.uid === 'swe-2-max').dimension.order === 3, 'swe-2-max keeps canonical order 3 when officially bound');
 });
+
+test('a curated first page replaces the default groups in JSON and proto, routers first, idempotent', () => {
+  const fusion = catalog.models.find(model => model.kind === 'fusion');
+  const byok = catalog.models.find(model => model.kind !== 'fusion');
+  const familyLabels = catalog.models.filter(model => model.kind === 'model' && model.json.modelInfo.modelFamilyUid === byok.json.modelInfo.modelFamilyUid).map(model => model.label);
+  const home = { ...catalog, hiddenNativeModelUids: ['hidden-plain'],
+    homeModelUids: [byok.uid, 'official-plain', 'official-router', fusion.uid, 'hidden-plain', 'not-there', 'disabled-plain'] };
+  const input = { clientModelConfigs: [
+    { label: 'Official Plain', modelUid: 'official-plain' },
+    { label: 'Official Router', modelUid: 'official-router', modelInfo: { isModelRouter: true } },
+    { label: 'Hidden Plain', modelUid: 'hidden-plain' },
+    { label: 'Disabled Plain', modelUid: 'disabled-plain', disabled: true }],
+    clientModelSorts: [{ name: 'Recommended', groups: [{ groupName: 'Official', modelLabels: ['Official Plain', 'Hidden Plain'] }] }] };
+  const output = augmentCatalog(input, { rpc: 'GetCascadeModelConfigs', format: json, catalog: home });
+  const groups = output.clientModelSorts[0].groups;
+  assert.deepEqual(groups.map(group => group.groupName), ['首页 Fusion', '首页模型']);
+  assert.deepEqual(groups[0].modelLabels, ['Official Router', fusion.label]);
+  assert.deepEqual(groups[1].modelLabels, [...familyLabels, 'Official Plain', 'Disabled Plain']);
+  assert.equal(output.clientModelConfigs.find(model => model.modelUid === 'disabled-plain').disabled, true,
+    'editing display groups never unlocks an unavailable official model');
+  assert.ok(output.clientModelConfigs.some(model => model.modelUid === 'official-plain'), 'models outside the home groups remain searchable');
+  // Every own model stays selectable through search even when not on the first page.
+  assert.ok(catalog.models.every(model => output.clientModelConfigs.some(entry => entry.modelUid === model.uid)));
+  assert.deepEqual(augmentCatalog(output, { rpc: 'GetCascadeModelConfigs', format: json, catalog: home }), output);
+  // Official routers are detected from modelInfo in the response and go with Fusion.
+  const withRouter = augmentCatalog(input, { rpc: 'GetCascadeModelConfigs', format: json,
+    catalog: { ...home, homeModelUids: ['official-router', 'official-plain'] } }).clientModelSorts[0].groups;
+  assert.deepEqual(withRouter.slice(0, 2).map(group => group.modelLabels), [['Official Router'], ['Official Plain']]);
+
+  const protoInput = cat(m(1, cat(s(1, 'Official Plain'), s(22, 'official-plain'))),
+    m(2, cat(s(1, 'Recommended'), m(2, cat(s(1, 'Official'), s(2, 'Official Plain'))))));
+  const protoOutput = augmentCatalog(protoInput, { rpc: 'GetCascadeModelConfigs', format: proto, catalog: home });
+  const protoGroups = fields(getNested(protoOutput, 2), 2);
+  assert.deepEqual(protoGroups.map(group => str(group.value, 1)), ['首页 Fusion', '首页模型']);
+  assert.deepEqual(fields(protoGroups[1].value, 2).map(field => field.value.toString()), [...familyLabels, 'Official Plain']);
+  assert.deepEqual(augmentCatalog(protoOutput, { rpc: 'GetCascadeModelConfigs', format: proto, catalog: home }), protoOutput);
+});
+
+test('without a curated list the default groups stay, and the list is normalized', () => {
+  const { normalizeHomeModels } = require('../src/catalog.cjs');
+  assert.deepEqual(normalizeHomeModels(['a', 'a', '', 7, 'b', 'x'.repeat(300)]), ['a', 'b']);
+  assert.equal(normalizeHomeModels(Array.from({ length: 80 }, (_, i) => 'm' + i)).length, 50);
+  assert.deepEqual(buildSavedCatalog({ enabled: false, homeModels: ['a'] }).homeModelUids, []);
+  const output = augmentCatalog({ clientModelConfigs: [], clientModelSorts: [{ name: 'Recommended', groups: [] }] },
+    { rpc: 'GetCascadeModelConfigs', format: json, catalog });
+  assert.equal(output.clientModelSorts[0].groups[0].groupName, '我的 Fusion');
+});
+
+test('an explicitly empty home never restores official groups, and every model stays searchable', () => {
+  const config = { ...catalog, homeConfigured: true, homeModelUids: [] };
+  const input = { clientModelConfigs: [{ label: 'Official', modelUid: 'official', disabled: true }],
+    clientModelSorts: [{ name: 'Recommended', groups: [{ groupName: 'Official', modelLabels: ['Official'] }] }] };
+  const output = augmentCatalog(input, { rpc: 'GetCascadeModelConfigs', format: json, catalog: config });
+  assert.deepEqual(output.clientModelSorts[0].groups, []);
+  assert.equal(output.clientModelConfigs.length, 1 + catalog.models.length);
+  assert.equal(output.clientModelConfigs.find(model => model.modelUid === 'official').disabled, true);
+  const protoInput = cat(m(1, cat(s(1, 'Official'), s(22, 'official'), v(4, 1))),
+    m(2, cat(s(1, 'Recommended'), m(2, cat(s(1, 'Official'), s(2, 'Official'))))));
+  const protoOutput = augmentCatalog(protoInput, { rpc: 'GetCascadeModelConfigs', format: proto, catalog: config });
+  assert.deepEqual(fields(getNested(protoOutput, 2), 2), []);
+  assert.equal(fields(protoOutput, 1).length, 1 + catalog.models.length);
+});

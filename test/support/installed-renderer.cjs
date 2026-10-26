@@ -28,9 +28,9 @@ function required(match, what) {
 // Family grouping + row selection: returns { group(models), rows(grouped) }.
 function loadFamilyPicker() {
   const source = load();
-  const grouping = required(source.match(/function (\w+)\(e\)\{let t=new Map,n=\[\];for\(let r of e\)\{let e=r\.familyUid;/), 'family grouping');
-  const wrapper = required(source.match(new RegExp(`function (\\w+)\\(e,t\\)\\{let\\{families:n\\}=${grouping[1]}\\(t\\?\\?e\\)`)), 'grouped picker input');
-  const rows = required(source.match(/function (\w+)\(e,t,n,r,i\)\{let\{fullFamilies:a,families:o,ordered:s\}=e/), 'picker rows');
+  const grouping = required(source.match(/function (\w+)\(e\)\{let \w+=new Map,\w+=\[\];for\(let \w+ of e\)\{let e=\w+\.familyUid;/), 'family grouping');
+  const wrapper = required(source.match(new RegExp(`function (\\w+)\\(e,\\w+\\)\\{let\\{families:\\w+\\}=${grouping[1]}\\(\\w+\\?\\?e\\)`)), 'grouped picker input');
+  const rows = required(source.match(/function (\w+)\(e,\w+,\w+,\w+,\w+\)\{let\{fullFamilies:\w+,families:\w+,ordered:\w+\}=e/), 'picker rows');
   const start = source.indexOf(grouping[0]);
   const rowsStart = source.indexOf(rows[0], start);
   const end = rowsStart + functionSource(source, rows[1]).length;
@@ -42,9 +42,9 @@ function loadFamilyPicker() {
 // ACP session option intersection: returns { options(session), filter(session, models) }.
 function loadAcpPicker() {
   const source = load();
-  const use = required(source.match(/let e=(\w+)\((\w+)\.options\);return (\w+)\.filter\(t=>e\.has\(t\.modelUid\)\|\|t\.disabled\)/), 'session/catalog intersection');
-  const collector = required(source.match(new RegExp(`function ${use[1]}\\(e\\)\\{let t=new Set;for\\(let n of e\\)if\\((\\w+)\\(n\\)\\)`)), 'session option collector');
-  const code = `${functionSource(source, collector[1])};${functionSource(source, use[1])};${use[1]}`;
+  const use = required(source.match(/let e=(\w+)\((\w+)\.options\);return (\w+)\.filter\((\w+)=>e\.has\(\4\.modelUid\)\|\|\4\.disabled\)/), 'session/catalog intersection');
+  const collector = required(source.match(new RegExp(`function ${use[1]}\\(e\\)\\{let \\w+=new Set;for\\(let (\\w+) of e\\)if\\((\\w+)\\(\\1\\)\\)`)), 'session option collector');
+  const code = `${functionSource(source, collector[2])};${functionSource(source, use[1])};${use[1]}`;
   const collect = vm.runInNewContext(code);
   const select = new Function(use[1], use[2], use[3], use[0]);
   return { collect, filter: (session, models) => select(collect, session, models) };
@@ -53,9 +53,18 @@ function loadAcpPicker() {
 // Recommended-group sorter that marks the router-only group as featured.
 function loadGroupSorter() {
   const source = load();
-  const hit = required(source.match(/function (\w+)\(e,t=\w+,n=\(\)=>!0\)\{return e\.map\(e=>\{let r=e\.groups\.map\(e=>\(\{groupName:e\.groupName,options:e\.options\.filter\(n\)\.map\(e=>t\(e\)\),isFeatured:!!\(e\.options\.length>0&&e\.options\.every\(e=>e\.modelInfo\?\.displayOption===(\w+)\.MODEL_ROUTER\)\)\|\|void 0/), 'featured group sorter');
-  const sorter = vm.runInNewContext(`${functionSource(source, hit[1]).replace(/t=\w+,n=/, 't=e=>e,n=')};${hit[1]}`, { [hit[2]]: { MODEL_ROUTER: 3 } });
+  const hit = required(source.match(/function (\w+)\(e,(\w+)=\w+,(\w+)=\(\)=>!0\)\{return e\.map\(e=>\{let \w+=e\.groups\.map\(e=>\(\{groupName:e\.groupName,options:e\.options\.filter\(\3\)\.map\(e=>\2\(e\)\),isFeatured:!!\(e\.options\.length>0&&e\.options\.every\(e=>e\.modelInfo\?\.displayOption===(\w+)\.MODEL_ROUTER\)\)\|\|void 0/), 'featured group sorter');
+  const sorter = vm.runInNewContext(`${functionSource(source, hit[1]).replace(new RegExp(`${hit[2]}=\\w+,${hit[3]}=`), `${hit[2]}=e=>e,${hit[3]}=`)};${hit[1]}`, { [hit[4]]: { MODEL_ROUTER: 3 } });
   return sorter;
 }
 
-module.exports = { rendererFile, available, loadFamilyPicker, loadAcpPicker, loadGroupSorter };
+function loadEffortPicker() {
+  const source = load();
+  const select = required(source.match(/function (\w+)\(e,(\w+),(\w+),(\w+)\)\{let (\w+)=(\w+)\(\2,e\.dimensions\),(\w+)=e\.dimensions\[\3\];if\(!\7\)return;let (\w+)=\7\.name,\w+=(\w+)\(e,\{\.\.\.\5,\[\8\]:\4\}\);/), 'family variant selection');
+  const start = source.indexOf(`function ${select[9]}(`);
+  const end = source.indexOf(select[0]) + functionSource(source, select[1]).length;
+  if (start < 0 || start >= end) throw new Error('installed Devin effort picker range');
+  return vm.runInNewContext(`${source.slice(start, end)};${select[1]}`);
+}
+
+module.exports = { rendererFile, available, loadFamilyPicker, loadAcpPicker, loadGroupSorter, loadEffortPicker };

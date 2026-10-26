@@ -181,3 +181,15 @@ test('backend observations remain scoped to the live instance', async t => {
   const body = await raw.json();
   assert.ok(body.models.length > 0, 'backend records persist per instance until replaced by fresh observations');
 });
+
+test('readNativeModels retries a reset pooled connection once and still fails on other errors', async () => {
+  const reset = () => Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }) });
+  let calls = 0;
+  const flaky = async () => { calls++; if (calls === 1) throw reset(); return new Response(JSON.stringify({ service: 'other' })); };
+  await assert.rejects(readNativeModels({ root: os.tmpdir(), port: 1, request: flaky }), /native_catalog_identity/);
+  assert.equal(calls, 2, 'one retry after the reset, then the identity check runs');
+  let refused = 0;
+  const down = async () => { refused++; throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } }); };
+  await assert.rejects(readNativeModels({ root: os.tmpdir(), port: 1, request: down }), /fetch failed/);
+  assert.equal(refused, 1, 'a refused connection is not retried');
+});

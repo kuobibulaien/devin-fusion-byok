@@ -171,6 +171,7 @@ test('the external MCP switch is off unless written on, and lives in Devin globa
   fs.writeFileSync(path.join(dir, 'external-mcp.json'), 'not json');
   assert.equal(readEnabled({ dir }), false);
   assert.equal(storageDir({ platform: 'darwin', home: '/h' }), '/h/Library/Application Support/Devin/User/globalStorage/local.devin-fusion-byok');
-  assert.equal(readEnabled({ dir: undefined }), false);
+  // undefined selects the real user's default storage, which may be enabled.
+  assert.equal(readEnabled({ dir: '' }), false);
   fs.rmSync(dir, { recursive: true });
 });

@@ -8,6 +8,7 @@ const { buildCatalog, normalizeFusionConfig } = require('./catalog.cjs');
 const { createManager } = require('./panel/model.cjs');
 const { installLsInjection } = require('./runtime/ls-injection.cjs');
 const { createLsBridge } = require('./runtime/bridge.cjs');
+const { backendEnvironment } = require('./runtime/backend-env.cjs');
 const { runtimeIdentity, controlFile, PORT, MANAGEMENT_PROTOCOL } = require('./runtime/backend.cjs');
 const { readReceipt, remember, saveReceipt, valueAt, restoreObject, permitted } = require('./lifecycle/owned-settings.cjs');
 const { readNativeModels } = require('./runtime/native-models.cjs');
@@ -64,7 +65,7 @@ function compareVersion(left, right) {
   for (let i = 0; i < Math.max(a.length, b.length); i++) if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) - (b[i] || 0);
   return 0;
 }
-async function ensureBackend({ root, extensionPath, signal, log = () => {}, port = PORT, onCompatibleRuntime }, dependencies = {}) {
+async function ensureBackend({ root, extensionPath, signal, log = () => {}, port = PORT, onCompatibleRuntime, proxyUrl }, dependencies = {}) {
   const request = dependencies.fetch || fetch;
   const spawnRuntime = dependencies.spawn || spawn;
   const wait = dependencies.sleep || pause;
@@ -75,7 +76,7 @@ async function ensureBackend({ root, extensionPath, signal, log = () => {}, port
     if (signal?.aborted) throw new RuntimeError('cancelled');
     // Re-read source hashes so windows running the same package version converge
     // on the files currently installed, even after a same-version reinstall.
-    const expected = runtimeIdentity(root, true);
+    const expected = runtimeIdentity(root, true, backendEnvironment(process.env, proxyUrl));
     let response;
     try { response = await request(base + '/health', { signal: timeout(1000) }); } catch {}
     if (signal?.aborted) throw new RuntimeError('cancelled');
@@ -84,7 +85,7 @@ async function ensureBackend({ root, extensionPath, signal, log = () => {}, port
         let failed = false;
         try {
           const child = spawnRuntime(process.execPath, [path.join(extensionPath, 'src/runtime/backend.cjs'), root], {
-            detached: true, stdio: 'ignore', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+            detached: true, stdio: 'ignore', env: backendEnvironment(process.env, proxyUrl),
           });
           child.once('error', () => { failed = true; }); child.unref();
         } catch { throw new RuntimeError('startup_failed'); }
@@ -102,11 +103,11 @@ async function ensureBackend({ root, extensionPath, signal, log = () => {}, port
     if (health?.service !== expected.service) throw new RuntimeError('port_in_use');
     if (health.rootId && health.rootId !== expected.rootId) throw new RuntimeError('different_storage');
     if (compareVersion(health.version, expected.version) > 0) throw new RuntimeError('newer_runtime');
-    if (health.version === expected.version && health.sourceId === expected.sourceId && health.rootId === expected.rootId && !health.draining) return health;
+    if (health.version === expected.version && health.sourceId === expected.sourceId && health.networkId === expected.networkId && health.rootId === expected.rootId && !health.draining) return health;
     if (health.managementProtocol !== MANAGEMENT_PROTOCOL || !health.instanceId || !health.rootId ||
         !Number.isSafeInteger(health.activeRequests) || health.activeRequests < 0) throw new RuntimeError('legacy_runtime');
     if (!compatibleNotified && !health.draining && !signal?.aborted &&
-        (health.version !== expected.version || health.sourceId !== expected.sourceId)) {
+        (health.version !== expected.version || health.sourceId !== expected.sourceId || health.networkId !== expected.networkId)) {
       compatibleNotified = true;
       try { onCompatibleRuntime?.(health); } catch {}
     }
@@ -145,6 +146,7 @@ async function activate(context) {
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
   if (!fs.existsSync(configFile)) writeConfig(configFile, importLegacy());
   const config = () => readConfig(configFile);
+  let management, manager, nativePicker;
   let autoContinue, goalContinue;
   const nativeMain = (() => {
     try {
@@ -153,6 +155,14 @@ async function activate(context) {
         ? path.resolve(native.extensionPath, native.packageJSON.main) : null;
     } catch { return null; }
   })();
+  if (nativeMain) {
+    try {
+      nativePicker = require('./runtime/native-picker.cjs').installNativePicker({ nativeMainPath: nativeMain,
+        isEnabled: () => !activationDisposed && config().enabled !== false,
+        onChange: () => { try { void management?.publishPicker()?.catch(() => {}); } catch {} } });
+      context.subscriptions.push(nativePicker);
+    } catch { log('native-picker-unavailable'); }
+  }
   try {
     if (nativeMain) {
       // Goal mode is opt-in: /goal is neither advertised nor intercepted until the user turns it on.
@@ -209,7 +219,6 @@ async function activate(context) {
     goalContinue = undefined;
   };
   const catalog = () => { const current = config(); return buildCatalog(current.enabled === false ? { ...current, providers: [] } : current, [...nativeModels.values()]); };
-  let management, manager;
   const nativeModels = new Map(), localNativeModels = new Map();
   let nativeCatalogStatus = 'loading', syncPending, syncAbort, syncTimer;
   const refreshNativeModels = () => {
@@ -263,6 +272,14 @@ async function activate(context) {
     }
     if (changed && !activationDisposed) try { void management?.publish()?.catch(() => {}); } catch {}
   };
+  let hostCatalog;
+  if (nativeMain) try {
+    hostCatalog = require('./runtime/host-catalog.cjs').installHostCatalog({ nativeMainPath: nativeMain,
+      getCatalog: catalog, onNativeModels: observeNativeModels,
+      isEnabled: () => !activationDisposed && config().enabled !== false,
+      executeCommand: command => vscode.commands.executeCommand(command), log });
+    if (hostCatalog) context.subscriptions.push(hostCatalog);
+  } catch { log('host-catalog-unavailable'); }
   let enableQueue = Promise.resolve();
   const ensureEnabled = () => {
     const operation = enableQueue.then(() => {
@@ -279,6 +296,7 @@ async function activate(context) {
     let compatible;
     const compatibleReady = new Promise(resolve => { compatible = resolve; });
     const upgrade = ensureBackend({ root, extensionPath: context.extensionPath, signal: waiting.signal, log,
+      proxyUrl: vscode.workspace.getConfiguration('http').get('proxy', ''),
       onCompatibleRuntime: health => {
         if (waiting.signal.aborted) return;
         log('runtime-update-pending', { version: health.version });
@@ -327,6 +345,7 @@ async function activate(context) {
     }
     connection = injected;
     startNativeSync();
+    void hostCatalog?.refresh();
     log('activated', { nativeVersion: native.packageJSON.version, storage: root });
   }
   const run = fn => async () => { try { await fn(); } catch (error) {
@@ -419,6 +438,7 @@ async function activate(context) {
     const current = config(); current.enabled = false; writeConfig(configFile, current);
     await teardown();
     await restoreOwnedSettings();
+    await hostCatalog?.refresh();
     vscode.window.showInformationMessage('Fusion BYOK 已停用，原生连接已恢复。');
   };
   // Disabling in the extension manager restarts the extension host and never runs
@@ -450,7 +470,7 @@ async function activate(context) {
     readModels: () => catalog().models });
   pickerRefresh.prime();
   context.subscriptions.push(pickerRefresh);
-  manager = createManager({ read: config, write: current => writeConfig(configFile, current),
+  manager = createManager({ read: config, write: current => writeConfig(configFile, current), nativePicker,
     nativeModels: () => [...nativeModels.values()], refreshNativeModels, nativeCatalogStatus: () => nativeCatalogStatus,
     autoContinueStatus: () => autoContinue ? (autoContinue.status().connections > 0 ? 'attached' : 'waiting') : 'unavailable',
     selectedFusion: () => {
@@ -465,7 +485,9 @@ async function activate(context) {
         if (config().goalEnabled !== true) { try { goalController?.suspend({ reason: 'disabled' }); } catch { log('goal-suspend-failed'); } }
       } else if (type === 'setAutoContinue' || type === 'setAutoContinueUntilPlanComplete') resetAutoContinue?.();
       else if (config().enabled !== false) { await ensureEnabled(); await reconcileSelection(); }
-      pickerRefresh.changed();
+      if (type === 'setHomeModels' || type === 'resetHomeModels') nativePicker?.markReloadNeeded();
+      else pickerRefresh.changed();
+      await hostCatalog?.refresh();
     } });
   const updater = require('./update.cjs').createUpdateHost({ vscode, context,
     onChange: () => management?.publishUpdates?.() });
