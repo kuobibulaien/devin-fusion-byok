@@ -18,11 +18,16 @@ function installContextObserver({ nativeMainPath, isEnabled = () => true }) {
   }
   function enabled() { return !disposed && isEnabled(); }
   function attach(connector) {
-    if (connections.size >= 32 || connections.has(connector) || connector?.agentId !== 'devin-cli' || connector.bundled !== true || !['local', 'ssh', 'wsl'].includes(connector.location?.kind) ||
+    if (connections.has(connector) || connector?.agentId !== 'devin-cli' || connector.bundled !== true || !['local', 'ssh', 'wsl'].includes(connector.location?.kind) ||
         typeof connector.sendRequest !== 'function' || typeof connector.forwardClientRequest !== 'function') return;
+    if (connections.size >= 32) {
+      const stale = [...connections.values()].find(value => value.disconnected);
+      if (stale) stale.detach();
+      if (connections.size >= 32) return;
+    }
     const state = createContextState(), saved = [];
-    const entry = { state, active: true, saved, epoch: 0 };
-    const disconnect = () => { entry.epoch++; state.clear(); };
+    const entry = { state, active: true, saved, epoch: 0, disconnected: false };
+    const disconnect = () => { entry.disconnected = true; entry.epoch++; state.clear(); };
     function wrap(key, factory) {
       const previous = Object.getOwnPropertyDescriptor(connector, key), fn = connector[key];
       const wrapper = factory(fn);
@@ -84,7 +89,9 @@ function installContextObserver({ nativeMainPath, isEnabled = () => true }) {
       if (typeof connector.setStatus === 'function') wrap('setStatus', fn => function (status, ...rest) {
         const result = Reflect.apply(fn, this, [status, ...rest]);
         if (['disconnected', 'disabled', 'disposed'].includes(status)) {
-          if (connector.location.kind !== 'local' && status === 'disconnected') disconnect(); else detach();
+          if (connector.location.kind !== 'local') disconnect(); else detach();
+        } else if (['connected', 'ready'].includes(status)) {
+          entry.disconnected = false;
         }
         return result;
       });
@@ -109,8 +116,11 @@ function installContextObserver({ nativeMainPath, isEnabled = () => true }) {
   }
   function updateConnection(target, update, ...rest) {
     const result = Reflect.apply(originalUpdate, this, [target, update, ...rest]);
-    if (!disposed && update?.status === 'disconnected') for (const [connector, entry] of connections) {
-      if (connector.location?.kind !== 'local' && (target === connector || target === connector.id)) entry.disconnect();
+    if (!disposed && update?.status) for (const [connector, entry] of connections) {
+      if (connector.location?.kind !== 'local' && (target === connector || target === connector.id)) {
+        if (['disconnected', 'disabled', 'disposed'].includes(update.status)) entry.disconnect();
+        else if (['connected', 'ready'].includes(update.status)) entry.disconnected = false;
+      }
     }
     return result;
   }

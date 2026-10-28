@@ -108,3 +108,18 @@ test('remote mode publishes only a valid latest login and restores native models
   current = {}; await handle.refresh(); assert.equal(sent.length, 2);
   handle.dispose();
 });
+
+test('remote polling restores overwritten catalog without redundant writes and stops on disposal', async () => {
+  const { installHostCatalog } = require('../src/runtime/host-catalog.cjs');
+  const { status, catalog } = data(); let current = status, tick, cleared = false, unref = false; const sent = [];
+  class Database { prepare() { return { get: () => ({ value: JSON.stringify(current) }) }; } close() {} }
+  const handle = installHostCatalog({ vscode: { windsurfAuth: { setAuthStatus(value) { sent.push(value); current = value; } } },
+    stateDbPath: '/unused', database: Database, getCatalog: () => catalog,
+    setIntervalFn(fn, ms) { assert.equal(ms, 3000); tick = fn; return { unref() { unref = true; } }; },
+    clearIntervalFn() { cleared = true; } });
+  assert.equal(unref, true);
+  tick(); await handle.refresh(); assert.equal(sent.length, 1);
+  tick(); await handle.refresh(); assert.equal(sent.length, 1);
+  current = status; tick(); await handle.refresh(); assert.equal(sent.length, 2);
+  handle.dispose(); assert.equal(cleared, true); tick(); await handle.refresh(); assert.equal(sent.length, 2);
+});

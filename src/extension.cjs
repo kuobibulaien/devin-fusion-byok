@@ -164,14 +164,22 @@ async function activate(context) {
       return fallback && fs.existsSync(fallback) ? fallback : null;
     } catch { return null; }
   })();
+  const wslMain = (() => {
+    try {
+      const ext = vscode.extensions.getExtension('codeium.windsurf-remote-wsl');
+      if (ext?.extensionPath && ext.packageJSON?.main) return path.resolve(ext.extensionPath, ext.packageJSON.main);
+      const fallback = vscode.env?.appRoot && path.join(vscode.env.appRoot, 'extensions/windsurf-remote-wsl/dist/extension.js');
+      return fallback && fs.existsSync(fallback) ? fallback : null;
+    } catch { return null; }
+  })();
   let remoteSupport, acpInjection, remoteInstall, remoteGeneration = 0;
   const startRemoteSupport = () => {
     if (remoteInstall) return remoteInstall;
     remoteInstall = (async () => {
       const generation = remoteGeneration;
-      if (!remoteSupport && (opensshMain || nativeMain)) {
+      if (!remoteSupport && (opensshMain || wslMain || nativeMain)) {
         try { remoteSupport = require('./runtime/remote-tunnel.cjs').installRemoteSupport({ vscode, nativeMainPath: nativeMain,
-          opensshMainPath: opensshMain, root, isEnabled: () => !activationDisposed && config().enabled !== false, log }); }
+          opensshMainPath: opensshMain, wslMainPath: wslMain, root, isEnabled: () => !activationDisposed && config().enabled !== false, log }); }
         catch { log('remote-support-unavailable'); }
       }
       if (nativeMain && remoteSupport && !acpInjection) {

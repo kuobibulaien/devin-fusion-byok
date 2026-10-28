@@ -240,3 +240,22 @@ test('statusbar uses untrusted plain text, coalesces metrics reads and disposes 
   assert.equal(typeof item.tooltip, 'string'); assert.doesNotMatch(item.tooltip, /不保证是当前聊天|本轮耗时/);
   handle.dispose(); resolve({ snapshot: null }); await tick();
 });
+
+test('remote disconnected entries are evicted at capacity while reconnected entries are retained', () => {
+  const f = fixture(), remotes = [];
+  for (let i = 0; i < 31; i++) {
+    const c = { id: `remote-${i}`, agentId: 'devin-cli', bundled: true, location: { kind: 'ssh' }, sendRequest() {}, forwardClientRequest() {}, setStatus() {} };
+    remotes.push(c); f.api.registerConnection(c);
+  }
+  f.api.updateConnection('remote-0', { status: 'disconnected' });
+  f.api.updateConnection('remote-0', { status: 'connected' });
+  remotes[1].setStatus('disabled');
+  const newcomer = { id: 'new', agentId: 'devin-cli', bundled: true, location: { kind: 'wsl' }, sendRequest() {}, forwardClientRequest() {} };
+  f.api.registerConnection(newcomer);
+  newcomer.forwardClientRequest({ method: 'session/update', params: { sessionId: 'new-session', update: update(42) } });
+  assert.equal(f.handle.status().connections, 32);
+  assert.equal(f.handle.snapshot()[0].lead.used, 42);
+  remotes[0].forwardClientRequest({ method: 'session/update', params: { sessionId: 'retained', update: update(7) } });
+  assert.ok(f.handle.snapshot().some(item => item.sessionId === 'retained'));
+  f.handle.dispose();
+});

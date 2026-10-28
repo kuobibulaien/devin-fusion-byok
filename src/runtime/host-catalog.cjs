@@ -26,14 +26,16 @@ function transformStatus(status, catalog, onNativeModels, stripOwn = false) {
 }
 
 function installHostCatalog({ nativeMainPath, vscode, stateDbPath, database, getCatalog, isEnabled = () => true, onNativeModels,
+  setIntervalFn, clearIntervalFn,
   executeCommand, log = () => {} } = {}) {
   const api = nativeMainPath ? createRequire(nativeMainPath)('vscode').windsurfAuth : vscode?.windsurfAuth;
   // Older hosts continue using the LS bridge.
   if (typeof api?.setAuthStatus !== 'function') return null;
   if (api[INSTANCE]) return api[INSTANCE];
   if (!nativeMainPath) {
+    setIntervalFn ||= setInterval; clearIntervalFn ||= clearInterval;
     let disposed = false, pending;
-    return {
+    const handle = {
       refresh() {
         if (disposed) return Promise.resolve();
         if (!pending) pending = Promise.resolve().then(async () => {
@@ -48,14 +50,17 @@ function installHostCatalog({ nativeMainPath, vscode, stateDbPath, database, get
             const enabled = isEnabled();
             const catalog = enabled ? getCatalog : { models: [], hiddenNativeModelUids: [], hiddenFusionUids: [], homeModelUids: [] };
             const transformed = transformStatus(status, catalog, enabled ? onNativeModels : undefined, !enabled);
-            if (!disposed) await api.setAuthStatus(transformed);
+            if (!disposed && transformed !== status) await api.setAuthStatus(transformed);
           } catch { try { log('host catalog refresh unavailable'); } catch {} }
           finally { db?.close(); }
         }).finally(() => { pending = undefined; });
         return pending;
       },
-      dispose() { disposed = true; },
+      dispose() { disposed = true; clearIntervalFn(timer); },
     };
+    const timer = setIntervalFn(() => { void handle.refresh(); }, 3000);
+    timer.unref?.();
+    return handle;
   }
   const descriptor = Object.getOwnPropertyDescriptor(api, 'setAuthStatus');
   const original = api.setAuthStatus;

@@ -60,7 +60,7 @@ function remoteProgram(port, rootId, strict) {
   let failed = false; req.on('timeout', () => req.destroy()); req.on('error', () => { if (!failed) { failed = true; listen(); } });
 }
 function createRemoteTunnelManager({ workspace, vscode, root, port = 39842, isEnabled = () => true, log = () => {} }) {
-  const entries = new Map(); let disposed = false;
+  const entries = new Map(); let disposed = false, lastResolvedAuthority;
   function frame(type, id, data = Buffer.alloc(0)) { const h = Buffer.alloc(9); h[0] = type; h.writeUInt32BE(id, 1); h.writeUInt32BE(data.length, 5); return Buffer.concat([h, data]); }
   function close(entry) {
     if (entry.closed) return; entry.closed = true;
@@ -88,10 +88,12 @@ function createRemoteTunnelManager({ workspace, vscode, root, port = 39842, isEn
         input = Buffer.concat([input, Buffer.from(chunk)]);
         if (!ready) {
           const end = input.indexOf(10); if (end < 0) { if (input.length > 1024) fail('remote_tunnel_bad_ready'); return; }
-          const line = input.subarray(0, end).toString(); input = input.subarray(end + 1);
+          const line = input.subarray(0, end).toString().trim(); input = input.subarray(end + 1);
           const match = /^READY:(\d+):(direct|stdio)$/.exec(line);
           if (!match || +match[1] < 1 || +match[1] > 65535 || (entry.strict && +match[1] !== port)) { fail(line.startsWith('ERROR:') ? line.slice(6) : 'remote_tunnel_bad_ready'); return; }
-          ready = true; entry.port = +match[1]; entry.mode = match[2]; clearTimeout(timeout); settled = true; resolve(entry.port);
+          ready = true; entry.port = +match[1]; entry.mode = match[2]; clearTimeout(timeout); settled = true;
+          if (entry.mode === 'direct' && entries.get(entry.authority) === entry) entries.delete(entry.authority);
+          resolve(entry.port);
         }
         if (entry.mode !== 'stdio') return;
         while (input.length >= 9) {
@@ -120,18 +122,19 @@ function createRemoteTunnelManager({ workspace, vscode, root, port = 39842, isEn
   }
   function currentAuthority() {
     const uris = [vscode.workspace?.workspaceFile, ...(vscode.workspace?.workspaceFolders || []).map(folder => folder.uri)];
-    return uris.find(uri => uri?.scheme === 'vscode-remote' && uri.authority)?.authority;
+    return uris.find(uri => uri?.scheme === 'vscode-remote' && uri.authority)?.authority || lastResolvedAuthority;
   }
   return {
     ensureTunnel,
+    recordResolvedAuthority(authority) { lastResolvedAuthority = authority; },
     resolveRemoteServerUrl: async location => 'http://127.0.0.1:' + await ensureTunnel(locationToAuthority(location)),
     ensureCurrentRemoteWindowTunnel() { const authority = currentAuthority(); if (!authority) return Promise.reject(new Error('remote_authority_unavailable')); return ensureTunnel(authority, { strictPort: true }); },
     status() { return [...entries.values()].map(({ authority, mode, port: remotePort }) => ({ authority, mode: mode || 'connecting', port: remotePort || null })); },
     dispose() { disposed = true; for (const entry of [...entries.values()]) close(entry); },
   };
 }
-function installRemoteSupport({ vscode, nativeMainPath, opensshMainPath, root, port = 39842, isEnabled = () => true, log = () => {} }) {
-  const apiPath = opensshMainPath || nativeMainPath;
+function installRemoteSupport({ vscode, nativeMainPath, opensshMainPath, wslMainPath, root, port = 39842, isEnabled = () => true, log = () => {} }) {
+  const apiPath = opensshMainPath || wslMainPath || nativeMainPath;
   if (!apiPath) throw new Error('remote_api_unavailable');
   const workspace = createRequire(apiPath)('vscode').workspace;
   const manager = createRemoteTunnelManager({ workspace, vscode, root, port, isEnabled, log });
@@ -145,10 +148,12 @@ function installRemoteSupport({ vscode, nativeMainPath, opensshMainPath, root, p
       return Reflect.apply(original, this, [command, args, options, ...rest]);
     });
   }
-  wrap(workspace, 'registerRemoteAuthorityResolver', original => function (prefix, resolver, ...rest) {
+  const workspaces = new Set([workspace]);
+  if (wslMainPath) workspaces.add(createRequire(wslMainPath)('vscode').workspace);
+  for (const targetWorkspace of workspaces) wrap(targetWorkspace, 'registerRemoteAuthorityResolver', original => function (prefix, resolver, ...rest) {
     if (['ssh-remote', 'wsl'].includes(prefix) && typeof resolver?.resolve === 'function') {
       const proxy = Object.create(resolver), resolve = resolver.resolve;
-      proxy.resolve = async function (authority, ...args) { const result = await Reflect.apply(resolve, resolver, [authority, ...args]); if (isEnabled()) void manager.ensureTunnel(authority, { strictPort: true }).catch(() => { try { log('remote-tunnel-unavailable'); } catch {} }); return result; };
+      proxy.resolve = async function (authority, ...args) { const result = await Reflect.apply(resolve, resolver, [authority, ...args]); manager.recordResolvedAuthority(authority); if (isEnabled()) void manager.ensureTunnel(authority, { strictPort: true }).catch(() => { try { log('remote-tunnel-unavailable'); } catch {} }); return result; };
       resolver = proxy;
     }
     return Reflect.apply(original, this, [prefix, resolver, ...rest]);
