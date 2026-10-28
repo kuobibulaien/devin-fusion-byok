@@ -56,6 +56,8 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
 
   const registrationDescriptor = Object.getOwnPropertyDescriptor(api, 'registerConnection');
   const originalRegister = api.registerConnection;
+  const originalUpdate = api.updateConnection;
+  const updateDescriptor = Object.getOwnPropertyDescriptor(api, 'updateConnection');
   const connections = new Map();
   const autoAttempts = new WeakMap();
   let disposed = false;
@@ -97,7 +99,7 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
 
   function attach(connector) {
     if (disposed || !connector || connector[ATTACHED] || connector.agentId !== 'devin-cli' ||
-        connector.bundled !== true || connector.location?.kind !== 'local' ||
+        connector.bundled !== true || !['local', 'ssh', 'wsl'].includes(connector.location?.kind) ||
         typeof connector.sendRequest !== 'function' || typeof connector.forwardClientRequest !== 'function') {
       return null;
     }
@@ -116,6 +118,7 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
       timers: new Map(),
       sessions: new Map(),
       turnGeneration: 0,
+      epoch: 0,
       sendRequestDescriptor,
       forwardDescriptor,
       setStatusDescriptor
@@ -669,21 +672,24 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
       return Reflect.apply(originalForward, this, args);
     };
 
+    entry.disconnect = () => {
+      entry.epoch++;
+      for (const timer of entry.timers.values()) clearTimer(timer);
+      entry.timers.clear();
+      for (const turn of entry.sessions.values()) {
+        turn.retryDisallowed = true;
+        if (turn.deferred && !turn.deferred.settled && turn.lastResult) {
+          turn.deferred.settled = true;
+          if (turn.lastResult.isReject) turn.deferred.reject(turn.lastResult.value);
+          else turn.deferred.resolve(turn.lastResult.value);
+        }
+      }
+      entry.sessions.clear();
+    };
     if (originalSetStatus) {
       entry.setStatusWrapper = function (status, ...rest) {
         if (['disconnected', 'disabled', 'disposed'].includes(String(status).toLowerCase())) {
-          cancelSessionTimer();
-          for (const timer of entry.timers.values()) clearTimer(timer);
-          entry.timers.clear();
-          for (const turn of entry.sessions.values()) {
-            turn.retryDisallowed = true;
-            if (turn.deferred && !turn.deferred.settled && turn.lastResult) {
-              turn.deferred.settled = true;
-              if (turn.lastResult.isReject) turn.deferred.reject(turn.lastResult.value);
-              else turn.deferred.resolve(turn.lastResult.value);
-            }
-          }
-          entry.sessions.clear();
+          entry.disconnect();
         }
         return Reflect.apply(originalSetStatus, this, [status, ...rest]);
       };
@@ -735,6 +741,14 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
   }
 
   api.registerConnection = registerWrapper;
+  function updateWrapper(target, update, ...rest) {
+    const result = Reflect.apply(originalUpdate, this, [target, update, ...rest]);
+    if (!disposed && update?.status === 'disconnected') for (const [connector, entry] of connections) {
+      if (connector.location?.kind !== 'local' && (target === connector || target === connector.id)) entry.disconnect();
+    }
+    return result;
+  }
+  if (typeof originalUpdate === 'function') api.updateConnection = updateWrapper;
 
   const handle = {
     status() {
@@ -785,6 +799,7 @@ function installAutoContinue({ nativeMainPath, isEnabled = () => false, getOptio
       disposed = true;
       handle.reset();
       restore(api, 'registerConnection', registerWrapper, registrationDescriptor);
+      if (typeof originalUpdate === 'function') restore(api, 'updateConnection', updateWrapper, updateDescriptor);
       for (const connector of [...connections.keys()]) detach(connector);
       delete api[INSTANCE];
     }

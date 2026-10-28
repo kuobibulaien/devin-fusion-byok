@@ -1,7 +1,12 @@
 'use strict';
 const crypto = require('node:crypto');
-const { renderPanel } = require('./view.cjs');
 const { PanelInputError } = require('./model.cjs');
+function loadRenderPanel() {
+  for (const mod of ['./view.cjs', './fast-context-view.cjs', './monitor-view.cjs', './update-view.cjs']) {
+    try { delete require.cache[require.resolve(mod)]; } catch {}
+  }
+  return require('./view.cjs').renderPanel;
+}
 function createPanelController({ vscode, context, manager, safeError, updater, restartApp, fastContext, readMonitor = async () => ({ status: 'unsupported', snapshot: null }) }) {
   let panel;
   let monitorPending = false;
@@ -67,6 +72,7 @@ function createPanelController({ vscode, context, manager, safeError, updater, r
       { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [] });
     lastState = undefined;
     const current = panel;
+    const renderPanel = loadRenderPanel();
     panel.webview.html = renderPanel({ nonce: crypto.randomBytes(24).toString('base64'), cspSource: panel.webview.cspSource });
     const messages = panel.webview.onDidReceiveMessage(async message => {
       if (!message || typeof message.id !== 'string' || message.id.length > 100 || typeof message.type !== 'string') return;

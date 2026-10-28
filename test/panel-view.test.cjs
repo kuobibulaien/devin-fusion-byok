@@ -108,3 +108,35 @@ test('settings offer an editable picker first page with reorder, remove, add and
   assert.match(html, /<details id="home-group" class="group" open><summary>选择器第一页/);
   for (const text of ["request('setHomeModels', { uids })", "'上移'", "'下移'", "'移除'", "'添加到首页'", "'恢复默认'"]) assert.ok(html.includes(text), text);
 });
+
+test('settings first-page candidate list and official model batch controls dispatch exact requests', async () => {
+  const { byId, posts, receive } = panel();
+  const initial = {
+    ...state(),
+    homeCustomized: true,
+    homeModels: [{ uid: 'dfbyok-cpa-saved', label: 'CPA · Saved', kind: 'model', available: true, disabled: false }],
+    homeCandidates: [
+      { uid: 'dfbyok-cpa-saved', label: 'CPA · Saved', kind: 'model', available: true, disabled: false },
+      { uid: 'fusion-dfbyok-1', label: 'Gemini gpt', kind: 'fusion', available: true, disabled: false },
+      { uid: 'swe-2-high', label: 'SWE-2 High', kind: 'official', available: false, disabled: true },
+    ],
+    nativeModels: [
+      { uid: 'swe-1.6-slow', label: 'SWE-1.6 Slow', disabled: false, hidden: false, eligible: true },
+      { uid: 'swe-2-high', label: 'SWE-2 High', disabled: true, hidden: false, eligible: false },
+    ],
+  };
+  receive({ data: { type: 'state', state: initial } });
+  const addButtons = collect(byId('home-candidates-list'), 'button', node => node.textContent === '添加到首页');
+  assert.equal(addButtons.length, 2, 'remaining candidates each have an add button');
+  addButtons[0].listeners.click();
+  const homePost = posts.find(m => m.type === 'setHomeModels');
+  assert.deepEqual(JSON.parse(JSON.stringify(homePost.payload)), { uids: ['dfbyok-cpa-saved', 'fusion-dfbyok-1'] });
+
+  receive({ data: { type: 'result', id: homePost.id, ok: true } });
+  await new Promise(resolve => setImmediate(resolve));
+  const hideDisabled = collect(byId('native-models'), 'button', node => node.textContent.startsWith('隐藏不可用模型'))[0];
+  assert.ok(hideDisabled, 'one-click hide unavailable models button is rendered');
+  hideDisabled.listeners.click();
+  const batchPost = posts.find(m => m.type === 'setNativeModelsHidden');
+  assert.deepEqual(JSON.parse(JSON.stringify(batchPost.payload)), { uids: ['swe-2-high'], hidden: true });
+});

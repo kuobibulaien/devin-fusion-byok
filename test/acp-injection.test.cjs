@@ -161,3 +161,42 @@ test('untrusted destination URLs and conflicting installations are rejected', as
   await assert.rejects(f.install({ apiServerUrl: 'http://127.0.0.1:39843' }), /different destination/);
   handle.dispose();
 });
+
+test('remote authentication resolves a fresh owned URL on reconnect without touching custom servers', async () => {
+  const f = fixture(); let port = 41000;
+  const handle = await f.install({ resolveRemoteServerUrl: async location => {
+    assert.equal(location.alias, 'example'); return `http://127.0.0.1:${port++}`;
+  } });
+  const connection = f.connector({ location: { kind: 'ssh', alias: 'example' } });
+  f.api.registerConnection(connection);
+  await connection.sendHandshakeRequest(auth('https://server.self-serve.windsurf.com'));
+  assert.equal(f.requests.at(-1).args[0].params._meta.api_server_url, 'http://127.0.0.1:41000');
+  await connection.sendHandshakeRequest(auth('http://127.0.0.1:41000'));
+  assert.equal(f.requests.at(-1).args[0].params._meta.api_server_url, 'http://127.0.0.1:41001');
+  const custom = auth('http://127.0.0.1:42000');
+  assert.equal(connection.sendHandshakeRequest(custom), f.returnValue);
+  assert.equal(f.requests.at(-1).args[0], custom);
+  handle.dispose();
+});
+
+test('remote tunnel errors and non-loopback destinations do not send credentials', async () => {
+  const f = fixture();
+  const handle = await f.install({ resolveRemoteServerUrl: async () => 'http://evil.example:41000' });
+  const connection = f.connector({ location: { kind: 'wsl', distro: 'test' } });
+  f.api.registerConnection(connection);
+  await assert.rejects(connection.sendHandshakeRequest(auth()), /loopback/);
+  assert.equal(f.requests.length, 0);
+  handle.dispose();
+});
+
+test('disposal while tunnel resolution is pending prevents authentication', async () => {
+  const f = fixture(); let finish;
+  const handle = await f.install({ resolveRemoteServerUrl: () => new Promise(resolve => { finish = resolve; }) });
+  const connection = f.connector({ location: { kind: 'wsl', distro: 'test' } });
+  f.api.registerConnection(connection);
+  const result = connection.sendHandshakeRequest(auth());
+  await Promise.resolve();
+  handle.dispose(); finish(LOCAL);
+  await assert.rejects(result, /disposed/);
+  assert.equal(f.requests.length, 0);
+});

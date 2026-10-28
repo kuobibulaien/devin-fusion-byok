@@ -141,7 +141,19 @@ function renderPanel({ nonce, cspSource }) {
     details.group[open] > summary::after { content: '▾'; }
     details.group > summary .hint { font-weight: 400; margin-left: auto; }
     .group-body { padding: 0 14px 14px; }
-    .role-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .role-grid, .home-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+    .home-col { min-width: 0; }
+    .home-col > .scroll { max-height: 264px; }
+    .sub-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; min-height: 28px; }
+    .sub-head h3 { margin: 0; }
+    .filter-pills { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+    button.pill { min-height: 24px; padding: 2px 10px; font-size: 12px; border-radius: 12px; color: var(--muted); background: transparent; border: 1px solid var(--border); }
+    button.pill:hover { color: var(--vscode-foreground, #ddd); background: var(--hover); }
+    button.pill.active { color: var(--vscode-button-foreground, #fff); background: var(--accent); border-color: var(--accent); }
+    .order-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--muted); background: var(--vscode-textCodeBlock-background, #2b2b2b); flex: none; }
+    details.picker-fold { border: 1px solid var(--border); border-radius: 6px; padding: 0 12px; }
+    details.picker-fold[open] { padding-bottom: 12px; }
+    details.picker-fold > summary { padding: 8px 0; }
     .setting { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; }
     .setting + .setting { border-top: 1px solid var(--border); }
     .toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 20; max-width: min(560px, calc(100vw - 32px)); display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--vscode-editorWidget-background, #252526); box-shadow: 0 4px 16px var(--vscode-widget-shadow, #0006); }
@@ -176,7 +188,7 @@ function renderPanel({ nonce, cspSource }) {
     @media (max-width: 700px) {
       body { padding: 0 16px 72px; }
       .topbar { margin: 0 -16px 16px; padding: 12px 16px 0; }
-      .models-layout, .role-grid { grid-template-columns: 1fr; }
+      .models-layout, .role-grid, .home-grid { grid-template-columns: 1fr; }
       .provider-nav { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
       .field-grid { grid-template-columns: 1fr; gap: 0; }
     }
@@ -202,8 +214,8 @@ function renderPanel({ nonce, cspSource }) {
     <section id="view-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
       <div id="settings-general"></div>
       <details id="home-group" class="group" open><summary>选择器第一页<span id="home-count" class="hint"></span></summary><div class="group-body" id="home-models"></div></details>
-      <details id="role-group" class="group"><summary>预设可选模型<span id="role-count" class="hint"></span></summary><div class="group-body"><p class="hint mb">新建预设时，下拉框只列出这里打开的模型。</p><div class="role-grid"><div id="role-lead"></div><div id="role-sidekick"></div></div></div></details>
-      <details id="native-group" class="group"><summary>官方模型显示<span id="native-count" class="hint"></span></summary><div class="group-body" id="native-models"></div></details>
+      <details id="native-group" class="group" open><summary>官方模型显示<span id="native-count" class="hint"></span></summary><div class="group-body" id="native-models"></div></details>
+      <details id="role-group" class="group"><summary>预设可选模型<span id="role-count" class="hint"></span></summary><div class="group-body"><p class="hint mb">新建预设时，下拉框只列出这里打开的模型，平时无需改动。</p><div class="role-grid"><div id="role-lead"></div><div id="role-sidekick"></div></div></div></details>
       ${updateMarkup()}
     </section>
   </main>
@@ -226,7 +238,11 @@ function panelClient(modelSupportsImages, vscode, normalizeBaseUrlPath) {
   let providerId = saved.providerId || '';
   let tab = saved.tab || 'presets';
   let modelSearch = '';
+  let homeSearch = '';
+  let homeFilter = 'all';
+  let homeNativeOpen = false;
   let nativeSearch = '';
+  let nativeFilter = 'all';
   let toastTimer;
   const roleSearch = { lead: '', sidekick: '' };
   const roleMoreOpen = { lead: false, sidekick: false };
@@ -490,14 +506,14 @@ function panelClient(modelSupportsImages, vscode, normalizeBaseUrlPath) {
     const setting = (title, sub, control) => element('div', { class: 'setting' },
       element('div', { class: 'row-main' }, element('span', { class: 'row-title', text: title }), sub ? element('span', { class: 'row-sub', text: sub }) : null), control);
     const status = state.autoContinueStatus === 'attached' ? null
-      : state.autoContinueStatus === 'waiting' ? '还没连上会话：重新加载窗口并新建对话后生效。'
+      : state.autoContinueStatus === 'waiting' ? '新建一次对话后即可生效。'
       : '自动继续当前不可用，请查看插件输出日志。';
     container.append(element('div', { class: 'section-head' }, element('h2', { text: '自动继续' })),
       element('div', { class: 'list' },
-        setting('服务商出错时自动重试', '临时错误打断回复时自动发送 continue。按量计费的服务商可能多扣费。',
+        setting('服务商出错时自动重试', '遇到临时错误打断回复时自动发送继续指令（按量计费接口可能增加消耗）。',
           switchInput(state.autoContinueOnProviderError === true, '服务商出错时自动重试',
             value => run(() => request('setAutoContinue', { enabled: value })), off())),
-        setting('待办没做完时自动继续', '会话里还有未完成的 Plan 时自动推进，随时可以手动停止。',
+        setting('待办没做完时自动继续', '对话里还有未完成的待办清单（Plan）时自动往下推进，可随时手动停止。',
           switchInput(state.autoContinueUntilPlanComplete === true, '待办没做完时自动继续',
             value => run(() => request('setAutoContinueUntilPlanComplete', { enabled: value })), off()))),
       element('p', { class: 'warn mt', text: status || '', hidden: !status }));
@@ -546,94 +562,193 @@ function panelClient(modelSupportsImages, vscode, normalizeBaseUrlPath) {
     if (!rows.length) container.append(element('div', { class: 'empty', text: list.length ? '没有匹配的模型。' : '暂无可选模型。' }));
   }
 
-  const HOME_KINDS = { fusion: '我的 Fusion', model: 'BYOK 模型', 'official-fusion': '官方 Fusion', official: '官方模型', unknown: '暂不可用' };
+  const HOME_KINDS = { fusion: '我的预设', model: '导入的模型', 'official-fusion': '官方预设', official: '官方模型', unknown: '已失效' };
+  const HOME_RANK = { fusion: 0, model: 1, 'official-fusion': 2, official: 3 };
   function renderHome() {
     const container = byId('home-models');
     container.replaceChildren();
     const customized = state.homeCustomized === true;
     const chosen = customized ? state.homeModels : state.homeDefaults || [], candidates = state.homeCandidates || [];
     const picker = state.nativePicker || {}, connected = picker.status === 'ready';
-    byId('home-count').textContent = '自选 ' + chosen.length + ' · 置顶 ' + (picker.pinned || []).length + ' · 最近 ' + (picker.recent || []).length;
-    const save = uids => run(() => request('setHomeModels', { uids }), '正在保存首页…', '已保存，应用到聊天菜单后生效。');
+    const pinnedRows = picker.pinned || [], recentRows = picker.recent || [];
+    byId('home-count').textContent = '已选 ' + chosen.length + (pinnedRows.length ? ' · 置顶 ' + pinnedRows.length : '') + (recentRows.length ? ' · 最近 ' + recentRows.length : '');
+    const save = uids => run(() => request('setHomeModels', { uids }), '正在保存第一页…', '已更新聊天菜单第一页。');
     const uids = chosen.map(item => item.uid);
     const move = (index, delta) => { const next = [...uids]; const [item] = next.splice(index, 1); next.splice(index + delta, 0, item); return save(next); };
-    container.append(element('p', { class: 'hint mb', text: '第一页由首页 Fusion、Pinned（置顶）、Recently Used（最近使用）和首页其他模型组成。每个模型只列一次，思考档位在原生模型菜单内切换。灰色项也能移除、排序；账号权限保持原样。' }),
-      element('div', { class: 'toolbar' }, button('同步当前第一页', () => run(() => request('refreshPicker'), '正在读取 Devin 当前列表…', '已同步当前列表。')),
-        element('span', { class: 'hint', text: connected ? '已连接原生列表 · 自动同步' : picker.status === 'unavailable' ? '原生列表暂不可用，请同步重试' : '正在连接原生列表；首次升级请重新加载一次窗口' })),
-      element('h3', { text: customized ? '首页自选模型' : '首页自选模型（默认）' }));
+    const remaining = candidates.filter(item => !uids.includes(item.uid));
+
+    container.append(element('p', { class: 'hint mb', text: '设置点开聊天模型菜单时，第一页直接展示哪些常用模型。修改后立即生效。' }));
+
+    const clearHome = button('清空', () => save([]), 'quiet');
+    clearHome.disabled = !chosen.length || off();
+    const reset = button('恢复默认', () => run(() => request('resetHomeModels'), '正在恢复默认首页…', '已恢复默认第一页。'), 'quiet');
+    reset.disabled = !customized || off();
+
+    const leftCol = element('div', { class: 'home-col' },
+      element('div', { class: 'sub-head' },
+        element('h3', { text: (customized ? '当前第一页' : '当前第一页（默认）') + ' · ' + chosen.length }),
+        element('div', { class: 'actions' }, clearHome, reset)));
+
     if (chosen.length) {
-      const list = element('div', { class: 'list mb', 'aria-label': '首页模型' });
+      const list = element('div', { class: 'list scroll', 'aria-label': '首页模型' });
       chosen.forEach((item, index) => list.append(element('div', { class: 'row compact' },
+        element('span', { class: 'order-badge', text: String(index + 1) }),
         element('div', { class: 'row-main' }, element('span', { class: 'row-title', text: item.label }),
-          element('span', { class: 'row-sub', text: HOME_KINDS[item.kind] + (item.disabled ? ' · 账号不可用（灰色项）' : item.available ? '' : ' · 当前目录中不存在') })),
+          element('span', { class: 'row-sub', text: (HOME_KINDS[item.kind] || '模型') + (item.disabled ? ' · 账号不可用' : item.available ? '' : ' · 当前不存在') })),
         element('div', { class: 'actions' },
           element('button', { type: 'button', class: 'quiet', text: '上移', disabled: index === 0 || off(), 'aria-label': '上移 ' + item.label, onclick: () => move(index, -1) }),
           element('button', { type: 'button', class: 'quiet', text: '下移', disabled: index === chosen.length - 1 || off(), 'aria-label': '下移 ' + item.label, onclick: () => move(index, 1) }),
           element('button', { type: 'button', class: 'quiet', text: '移除', disabled: off(), 'aria-label': '移除 ' + item.label, onclick: () => save(uids.filter(uid => uid !== item.uid)) })))));
-      container.append(list);
+      leftCol.append(list);
+    } else {
+      leftCol.append(element('div', { class: 'list' },
+        element('div', { class: 'empty', text: '第一页当前为空，从右侧点「添加到首页」即可加入。' })));
     }
-    if (customized && !chosen.length) container.append(element('p', { class: 'hint', text: '首页自选当前为空。置顶和最近使用独立保留；其他模型仍可搜索。' }));
-    const select = element('select', { 'aria-label': '选择要加到首页的模型', disabled: off() });
-    const remaining = candidates.filter(item => !uids.includes(item.uid));
-    for (const kind of ['fusion', 'official-fusion', 'model', 'official']) {
-      const items = remaining.filter(item => item.kind === kind);
-      if (!items.length) continue;
-      const group = element('optgroup', { label: HOME_KINDS[kind] });
-      for (const item of items) { const option = element('option', { text: item.label + (item.disabled ? '（账号不可用）' : '') }); option.value = item.uid; group.append(option); }
-      select.append(group);
+
+    const ownRemaining = remaining.filter(item => item.kind === 'fusion' || item.kind === 'model').map(item => item.uid);
+    const addOwnBtn = button('加入全部我的模型', () => save([...uids, ...ownRemaining].slice(0, 50)), 'quiet');
+    addOwnBtn.disabled = !ownRemaining.length || uids.length >= 50 || off();
+
+    const search = element('input', { type: 'search', placeholder: '搜索要添加的模型…', 'aria-label': '搜索要加到首页的模型',
+      oninput: event => { homeSearch = event.target.value; renderHomeCandidates(); } });
+    search.value = homeSearch;
+
+    const filterBar = element('div', { class: 'filter-pills' });
+    for (const [key, label] of [['all', '全部'], ['own', '我的模型'], ['official', '官方模型']]) {
+      filterBar.append(element('button', { type: 'button', class: 'pill' + (homeFilter === key ? ' active' : ''), text: label,
+        onclick: () => { homeFilter = key; renderHome(); } }));
     }
-    const add = button('添加到首页', () => select.value && save([...uids, select.value]), '');
-    add.disabled = !remaining.length || uids.length >= 50 || off();
-    const reset = button('恢复默认', () => run(() => request('resetHomeModels'), '正在恢复默认首页…', '已恢复默认，应用到聊天菜单后生效。'));
-    reset.disabled = !customized || off();
-    container.append(element('div', { class: 'toolbar' }, select, add, reset));
-    for (const [kind, title] of [['pinned', 'Pinned（置顶，含灰色项）'], ['recent', 'Recently Used（最近使用）']]) {
+
+    const rightCol = element('div', { class: 'home-col' },
+      element('div', { class: 'sub-head' },
+        element('h3', { text: '点击加入第一页 · ' + remaining.length }),
+        ownRemaining.length ? addOwnBtn : null),
+      element('div', { class: 'toolbar' }, search, filterBar),
+      element('div', { id: 'home-candidates-list', class: 'list scroll', 'aria-label': '可添加到首页的模型' }));
+
+    container.append(element('div', { class: 'home-grid mb' }, leftCol, rightCol));
+    renderHomeCandidates();
+
+    const saveNative = (kind, next) => run(() => request('setPickerList', { kind, uids: next, revision: picker.revision }),
+      '正在保存置顶与最近记录…', '已保存，点「刷新当前窗口」后生效。');
+    const pinFold = element('details', { class: 'fold picker-fold mt', open: homeNativeOpen || picker.needsReload === true },
+      element('summary', { text: '聊天菜单里的「置顶」与「最近使用」（置顶 ' + pinnedRows.length + ' · 最近 ' + recentRows.length + (picker.needsReload ? ' · 待刷新窗口' : '') + '）' }));
+    pinFold.addEventListener('toggle', () => { homeNativeOpen = pinFold.open; });
+
+    const syncBtn = button('同步状态', () => run(() => request('refreshPicker'), '正在读取…', '已同步。'), 'secondary');
+    const clearPinBtn = button('清空置顶', () => saveNative('pinned', []), 'secondary');
+    clearPinBtn.disabled = !connected || !pinnedRows.length || off();
+    const clearRecentBtn = button('清空最近使用', () => saveNative('recent', []), 'secondary');
+    clearRecentBtn.disabled = !connected || !recentRows.length || off();
+    const apply = button('刷新当前窗口使其生效', () => run(() => request('picker.reload'), '正在刷新当前窗口…', '正在重新加载当前窗口。'), picker.needsReload ? '' : 'secondary');
+    apply.disabled = off();
+
+    pinFold.append(
+      element('p', { class: 'hint mb', text: '如果在聊天菜单里点过图钉，或顶部留着去不掉的灰色官方置顶项，可以在这里一键清理（清理置顶后需刷新窗口生效）。' }),
+      element('div', { class: 'toolbar' }, syncBtn, clearPinBtn, clearRecentBtn, apply,
+        element('span', { class: 'hint', text: connected ? '已连接' : picker.status === 'unavailable' ? '暂未连接，请点同步重试' : '正在连接…' })));
+
+    const nativeGrid = element('div', { class: 'role-grid' });
+    for (const [kind, title] of [['pinned', '置顶（Pinned）'], ['recent', '最近使用（Recently Used）']]) {
       const rows = picker[kind] || [], ids = rows.flatMap(item => item.uids || [item.uid]);
-      const saveNative = next => run(() => request('setPickerList', { kind, uids: next, revision: picker.revision }),
-        '正在保存 Devin 原生列表…', '已保存，点击应用到聊天菜单后生效。');
-      container.append(element('h3', { text: title }));
-      const list = element('div', { class: 'list mb', 'aria-label': title });
-      if (!rows.length) list.append(element('div', { class: 'empty', text: connected ? '当前为空。' : '等待同步原生列表。' }));
+      const col = element('div', { class: 'home-col' }, element('h3', { text: title + ' · ' + rows.length }));
+      const list = element('div', { class: 'list', 'aria-label': title });
+      if (!rows.length) list.append(element('div', { class: 'empty', text: connected ? '当前为空。' : '等待同步…' }));
       rows.forEach((item, index) => {
-        const moveNative = delta => { const next = [...rows]; const [row] = next.splice(index, 1); next.splice(index + delta, 0, row); return saveNative(next.flatMap(item => item.uids || [item.uid])); };
-        const status = item.hidden ? '已在官方列表中隐藏' : item.kind === 'unknown' ? '已失效的保存记录，原生菜单不显示' : item.disabled ? '账号不可用（灰色项，可编辑显示）' : HOME_KINDS[item.kind];
+        const moveNative = delta => { const next = [...rows]; const [row] = next.splice(index, 1); next.splice(index + delta, 0, row); return saveNative(kind, next.flatMap(entry => entry.uids || [entry.uid])); };
+        const status = item.hidden ? '已隐藏' : item.kind === 'unknown' ? '已失效记录' : item.disabled ? '账号不可用' : (HOME_KINDS[item.kind] || '');
         list.append(element('div', { class: 'row compact' },
           element('div', { class: 'row-main' }, element('span', { class: 'row-title', text: item.kind === 'unknown' ? '已失效模型' : item.label }),
             element('span', { class: 'row-sub', text: status })),
           element('div', { class: 'actions' },
             element('button', { type: 'button', class: 'quiet', text: '上移', disabled: !connected || index === 0 || off(), 'aria-label': '上移' + kind + ' ' + item.label, onclick: () => moveNative(-1) }),
             element('button', { type: 'button', class: 'quiet', text: '下移', disabled: !connected || index === rows.length - 1 || off(), 'aria-label': '下移' + kind + ' ' + item.label, onclick: () => moveNative(1) }),
-            element('button', { type: 'button', class: 'quiet', text: '移除', disabled: !connected || off(), 'aria-label': '移除' + kind + ' ' + item.label, onclick: () => saveNative(ids.filter(uid => !(item.uids || [item.uid]).includes(uid))) }))));
+            element('button', { type: 'button', class: 'quiet', text: '移除', disabled: !connected || off(), 'aria-label': '移除' + kind + ' ' + item.label, onclick: () => saveNative(kind, ids.filter(uid => !(item.uids || [item.uid]).includes(uid))) }))));
       });
-      container.append(list);
-      if (kind === 'pinned') {
-        const pinSelect = element('select', { 'aria-label': '选择要置顶的模型', disabled: !connected || off() });
-        const remainingPins = candidates.filter(item => !rows.some(row => row.uid === item.uid));
-        for (const item of remainingPins) { const option = element('option', { text: item.label + (item.disabled ? '（账号不可用）' : '') }); option.value = item.uid; pinSelect.append(option); }
-        const pinAdd = button('添加到置顶', () => pinSelect.value && saveNative([...ids, pinSelect.value]));
-        pinAdd.disabled = !connected || !remainingPins.length || off();
-        container.append(element('div', { class: 'toolbar' }, pinSelect, pinAdd));
-      }
-      const clear = button('清空' + (kind === 'pinned' ? '置顶' : '最近使用'), () => saveNative([]));
-      clear.disabled = !connected || !rows.length || off(); container.append(clear);
+      col.append(list);
+      nativeGrid.append(col);
     }
-    const apply = button('应用到聊天菜单（刷新当前窗口）', () => run(() => request('picker.reload'), '正在刷新当前窗口…', '正在重新加载当前窗口。'));
-    apply.disabled = off();
-    container.append(element('div', { class: 'toolbar' }, apply),
-      element('p', { class: 'hint', text: (picker.needsReload ? '列表已保存。' : '') + '应用时会合并同一 BYOK 模型的重复档位置顶，保留最前面的档位。原生菜单需要重新加载当前窗口才会重读数据；刷新可能中断本窗口正在进行的对话。最近使用还会随着后续选模型自动变化。' }));
-    if (!candidates.some(item => item.kind.startsWith('official'))) container.append(element('p', { class: 'hint', text: '还没收到官方模型列表，打开一次 Devin 的模型选择器后，官方模型就会出现在这里。' }));
+    pinFold.append(nativeGrid);
+    container.append(pinFold);
+  }
+
+  function renderHomeCandidates() {
+    const container = byId('home-candidates-list');
+    if (!container) return;
+    container.replaceChildren();
+    const customized = state.homeCustomized === true;
+    const chosen = customized ? state.homeModels : state.homeDefaults || [];
+    const uids = chosen.map(item => item.uid);
+    const save = nextUids => run(() => request('setHomeModels', { uids: nextUids }), '正在保存第一页…', '已更新聊天菜单第一页。');
+    const query = homeSearch.trim().toLocaleLowerCase();
+    const remaining = (state.homeCandidates || []).filter(item => !uids.includes(item.uid)).filter(item => {
+      if (homeFilter === 'own') return item.kind === 'fusion' || item.kind === 'model';
+      if (homeFilter === 'official') return item.kind === 'official-fusion' || item.kind === 'official';
+      return true;
+    }).filter(item => !query || (item.label + ' ' + item.uid).toLocaleLowerCase().includes(query)).sort((a, b) => {
+      const rankA = (HOME_RANK[a.kind] ?? 9) + (a.disabled ? 10 : 0);
+      const rankB = (HOME_RANK[b.kind] ?? 9) + (b.disabled ? 10 : 0);
+      return rankA - rankB;
+    });
+    if (!remaining.length) {
+      container.append(element('div', { class: 'empty', text: (state.homeCandidates || []).length ? '没有匹配的可添加模型。' : '暂无可添加的模型。' }));
+      return;
+    }
+    for (const item of remaining) {
+      const add = button('添加到首页', () => save([...uids, item.uid]), 'quiet');
+      add.disabled = uids.length >= 50 || off();
+      container.append(element('div', { class: 'row compact' },
+        element('div', { class: 'row-main' },
+          element('span', { class: 'row-title', text: item.label }),
+          element('span', { class: 'row-sub', text: (HOME_KINDS[item.kind] || '模型') + (item.disabled ? ' · 账号不可用' : '') })),
+        add));
+    }
   }
 
   function renderNative() {
     const container = byId('native-models');
     container.replaceChildren();
     const all = state.nativeModels || [];
-    byId('native-count').textContent = all.length ? all.filter(model => !model.hidden).length + ' / ' + all.length + ' 显示中' : '';
-    const search = element('input', { type: 'search', placeholder: '搜索官方模型', 'aria-label': '搜索官方模型',
+    const visibleModels = all.filter(model => !model.hidden);
+    const unavailableVisible = all.filter(model => model.disabled && !model.hidden).map(model => model.uid);
+    const anyVisible = visibleModels.map(model => model.uid);
+    const anyHidden = all.filter(model => model.hidden).map(model => model.uid);
+    byId('native-count').textContent = all.length ? '显示 ' + visibleModels.length + ' / ' + all.length : '';
+
+    const search = element('input', { type: 'search', placeholder: '搜索官方模型…', 'aria-label': '搜索官方模型',
       oninput: event => { nativeSearch = event.target.value; renderNativeRows(); } });
     search.value = nativeSearch;
-    container.append(element('p', { class: 'hint mb', text: '关掉的模型只在本机列表里隐藏，不影响账号。' }),
-      element('div', { class: 'toolbar' }, search, button('刷新', () => run(() => request('refreshNativeModels'), '正在同步官方模型…', '已同步。'))),
+
+    const filterBar = element('div', { class: 'filter-pills' });
+    for (const [key, label] of [
+      ['all', '全部（' + all.length + '）'],
+      ['available', '可用（' + all.filter(m => !m.disabled).length + '）'],
+      ['disabled', '不可用（' + all.filter(m => m.disabled).length + '）'],
+      ['hidden', '已隐藏（' + anyHidden.length + '）'],
+    ]) {
+      filterBar.append(element('button', { type: 'button', class: 'pill' + (nativeFilter === key ? ' active' : ''), text: label,
+        onclick: () => { nativeFilter = key; renderNative(); } }));
+    }
+
+    const hideDisabledBtn = button('隐藏不可用模型' + (unavailableVisible.length ? '（' + unavailableVisible.length + '）' : ''),
+      () => run(() => request('setNativeModelsHidden', { uids: unavailableVisible, hidden: true }), '正在隐藏不可用模型…', '已隐藏所有不可用的官方模型。'),
+      unavailableVisible.length ? '' : 'secondary');
+    hideDisabledBtn.disabled = !unavailableVisible.length || off();
+
+    const hideAllBtn = button('全部隐藏',
+      () => run(() => request('setNativeModelsHidden', { uids: anyVisible, hidden: true }), '正在隐藏官方模型…', '已隐藏全部官方模型。'), 'secondary');
+    hideAllBtn.disabled = !anyVisible.length || off();
+
+    const showAllBtn = button('全部显示',
+      () => run(() => request('setNativeModelsHidden', { uids: anyHidden, hidden: false }), '正在恢复显示…', '已显示全部官方模型。'), 'secondary');
+    showAllBtn.disabled = !anyHidden.length || off();
+
+    const refreshBtn = button('刷新', () => run(() => request('refreshNativeModels'), '正在同步官方模型…', '已同步。'), 'secondary');
+
+    container.append(
+      element('p', { class: 'hint mb', text: '关掉用不上的官方模型（如灰色的 Pro 模型），让聊天模型菜单保持清爽。' }),
+      element('div', { class: 'toolbar' }, hideDisabledBtn, hideAllBtn, showAllBtn, refreshBtn),
+      element('div', { class: 'toolbar' }, search, filterBar),
       element('div', { id: 'native-list', class: 'list scroll', 'aria-label': '官方模型列表' }));
     renderNativeRows();
   }
@@ -644,16 +759,22 @@ function panelClient(modelSupportsImages, vscode, normalizeBaseUrlPath) {
     container.replaceChildren();
     const all = state.nativeModels || [];
     const query = nativeSearch.trim().toLocaleLowerCase();
-    const models = all.filter(model => !query || (model.uid + ' ' + (model.label || '')).toLocaleLowerCase().includes(query));
+    const models = all.filter(model => {
+      if (nativeFilter === 'available') return !model.disabled;
+      if (nativeFilter === 'disabled') return model.disabled === true;
+      if (nativeFilter === 'hidden') return model.hidden === true;
+      return true;
+    }).filter(model => !query || (model.uid + ' ' + (model.label || '')).toLocaleLowerCase().includes(query))
+      .sort((a, b) => Number(Boolean(a.disabled)) - Number(Boolean(b.disabled)));
     if (!models.length) {
-      container.append(element('div', { class: 'empty', text: all.length ? '没有匹配的模型。' : ({ loading: '正在同步官方模型…', unsupported: '当前后台版本暂不支持同步。', unavailable: '无法连接本地后台，请点刷新重试。', empty: '还没收到官方模型，打开一次 Devin 的模型选择器后再刷新。' }[state.nativeCatalogStatus] || '还没收到官方模型，请点刷新重试。') }));
+      container.append(element('div', { class: 'empty', text: all.length ? '当前筛选下没有匹配的官方模型。' : ({ loading: '正在同步官方模型…', unsupported: '当前后台版本暂不支持同步。', unavailable: '无法连接本地后台，请点刷新重试。', empty: '还没收到官方模型，打开一次 Devin 的模型选择器后再刷新。' }[state.nativeCatalogStatus] || '还没收到官方模型，请点刷新重试。') }));
       return;
     }
     for (const model of models) {
-      const note = model.disabled ? '官方暂不可用' : model.eligible === true ? '' : '不能用于预设';
-      container.append(element('div', { class: 'row' },
+      const note = model.disabled ? '账号不可用' : model.eligible === true ? '可用 · 支持加入预设' : '可用';
+      container.append(element('div', { class: 'row compact' },
         element('div', { class: 'row-main' }, element('span', { class: 'row-title', text: model.label || model.uid }),
-          element('span', { class: 'row-sub mono', text: model.uid + (note ? ' · ' + note : '') })),
+          element('span', { class: 'row-sub', text: note + (model.hidden ? ' · 已隐藏' : '') })),
         switchInput(model.hidden !== true, '在列表中显示官方模型 ' + model.uid,
           show => run(() => request('setNativeModelHidden', { uid: model.uid, hidden: !show })), off())));
     }

@@ -48,7 +48,7 @@ test('turn wall duration preserves generations and model changes invalidate cont
 });
 function fixture(protocolVersion = 1) {
   let enabled = true, response = Promise.resolve({}), forwardCalls = 0;
-  const api = { registerConnection() { return { dispose() {} }; } }, original = api.registerConnection;
+  const api = { registerConnection() { return { dispose() {} }; }, updateConnection() {} }, original = api.registerConnection;
   const module = { exports: {} };
   vm.runInNewContext(fs.readFileSync(require.resolve('../src/runtime/context-observer.cjs'), 'utf8'), { module, exports: module.exports, require(name) {
     if (name === 'node:module') return { createRequire: () => () => ({ windsurfAcp: api }) };
@@ -62,6 +62,22 @@ function fixture(protocolVersion = 1) {
   api.registerConnection(connector);
   return { api, original, connector, originalSend, originalForward, handle, setResponse(value) { response = value; }, disable() { enabled = false; }, forwards: () => forwardCalls };
 }
+test('remote disconnect clears context, ignores old replies and preserves wrappers for reconnect', async () => {
+  const f = fixture();
+  let finish;
+  const remote = { id: 'remote-1', agentId: 'devin-cli', bundled: true, location: { kind: 'ssh', alias: 'box' },
+    sendRequest: () => new Promise(resolve => { finish = resolve; }), forwardClientRequest() {}, setStatus() {} };
+  const registration = f.api.registerConnection(remote);
+  remote.sendRequest({ method: 'session/new', params: {} });
+  remote.forwardClientRequest({ method: 'session/update', params: { sessionId: 's', update: update() } });
+  f.api.updateConnection('remote-1', { status: 'disconnected' });
+  finish({ sessionId: 's', configOptions: [{ category: 'model', type: 'select', currentValue: 'stale' }] });
+  await tick(); assert.equal(f.handle.snapshot().length, 0);
+  remote.forwardClientRequest({ method: 'session/update', params: { sessionId: 's', update: update(30) } });
+  assert.equal(f.handle.snapshot()[0].lead.used, 30);
+  registration.dispose(); assert.equal(f.handle.status().connections, 1);
+  f.handle.dispose();
+});
 test('observer preserves native calls/promises, ignores authentication payload, tracks v1 and disposes', async () => {
   const f = fixture(), promise = Promise.resolve({}); f.setResponse(promise);
   assert.equal(f.connector.sendRequest({ method: 'authenticate', get params() { throw Error('must not read'); } }), promise);

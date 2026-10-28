@@ -32,7 +32,8 @@ function fixture(t, initial = {}) {
     ConfigurationTarget: { Global: 1 },
     workspace: { getConfiguration: section => section === 'http' ? { get: () => initial.httpProxy || '' } : settings,
       onDidChangeConfiguration: fn => { preferenceListeners.push(fn); return { dispose() {} }; } },
-    extensions: { getExtension: () => ({ extensionPath: '/native', packageJSON: { main: 'main.js', version: 'test' } }) },
+    extensions: { getExtension: id => initial.remote && id === 'codeium.windsurf' ? undefined : ({ extensionPath: '/native', packageJSON: { main: 'main.js', version: 'test' } }) },
+    env: initial.remote ? { remoteName: 'ssh-remote' } : {},
     commands: { registerCommand: (id, fn) => { commands.set(id, fn); return { dispose() {} }; } },
     window: {
       createOutputChannel: () => ({ appendLine: value => logs.push(value), show() {}, dispose() {} }),
@@ -77,6 +78,11 @@ function fixture(t, initial = {}) {
       return realRequire('./panel/model.cjs').createManager(options);
     } },
   };
+  let remoteDisposed = 0, remoteEnsured = 0;
+  if (initial.remote) overrides['./runtime/remote-tunnel.cjs'] = { installRemoteSupport: () => ({
+    ensureCurrentRemoteWindowTunnel: async () => { remoteEnsured++; return 39842; }, status: () => [],
+    dispose: () => { remoteDisposed++; },
+  }) };
   const module = { exports: {} };
   vm.runInNewContext(fs.readFileSync(filename, 'utf8'), { module, exports: module.exports, process,
     AbortController, AbortSignal, setInterval, clearInterval, setTimeout: (fn, _ms) => setTimeout(fn, 0), clearTimeout,
@@ -93,8 +99,17 @@ function fixture(t, initial = {}) {
     gateInjection: () => { let release; injectionGate = new Promise(resolve => { release = resolve; }); return release; },
     firePreference: (key = 'devin.acp.agentPreferences') => Promise.all(preferenceListeners.map(fn => fn({ affectsConfiguration: name => name === key }))),
     settle: async (ticks = 20) => { for (let index = 0; index < ticks; index++) await next(); },
-    counts: () => ({ installed, disposed }), host: () => ({ options: hostOptions, refreshes: hostRefreshes }) };
+    counts: () => ({ installed, disposed }), remoteCounts: () => ({ remoteDisposed, remoteEnsured }), host: () => ({ options: hostOptions, refreshes: hostRefreshes }) };
 }
+test('remote window starts a tunnel and disables its own lifecycle without native extension', async t => {
+  const f = fixture(t, { remote: true }); const active = await f.activate(f.context); await f.settle();
+  assert.equal(f.globals.agentEnv['devin-cli'].WINDSURF_API_SERVER_URL, 'http://127.0.0.1:39842');
+  assert.equal(active.status().state, 'ready'); assert.equal(f.remoteCounts().remoteEnsured, 1);
+  assert.equal(f.host().options.nativeMainPath, null);
+  await f.commands.get('devinFusionByok.disable')();
+  assert.equal(f.remoteCounts().remoteDisposed, 1);
+  assert.equal(f.globals.agentEnv['devin-cli'].WINDSURF_API_SERVER_URL, undefined);
+});
 test('activation and home edits refresh the host catalog, and disabled/unloaded hooks stop injecting', async t => {
   const f = fixture(t); await f.activate(f.context);
   assert.equal(f.host().options.nativeMainPath, '/native/main.js');

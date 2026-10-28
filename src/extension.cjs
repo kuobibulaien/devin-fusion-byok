@@ -25,6 +25,7 @@ let cancelAutoContinueSession;
 let stopGoalContinue;
 let goalController;
 let connection;
+let stopRemoteSupport;
 let runtimeWaitAbort;
 let activationGeneration = 0;
 let reconcileHalted = true;
@@ -155,6 +156,37 @@ async function activate(context) {
         ? path.resolve(native.extensionPath, native.packageJSON.main) : null;
     } catch { return null; }
   })();
+  const opensshMain = (() => {
+    try {
+      const ext = vscode.extensions.getExtension('codeium.windsurf-remote-openssh');
+      if (ext?.extensionPath && ext.packageJSON?.main) return path.resolve(ext.extensionPath, ext.packageJSON.main);
+      const fallback = vscode.env?.appRoot && path.join(vscode.env.appRoot, 'extensions/windsurf-remote-openssh/dist/extension.js');
+      return fallback && fs.existsSync(fallback) ? fallback : null;
+    } catch { return null; }
+  })();
+  let remoteSupport, acpInjection, remoteInstall, remoteGeneration = 0;
+  const startRemoteSupport = () => {
+    if (remoteInstall) return remoteInstall;
+    remoteInstall = (async () => {
+      const generation = remoteGeneration;
+      if (!remoteSupport && (opensshMain || nativeMain)) {
+        try { remoteSupport = require('./runtime/remote-tunnel.cjs').installRemoteSupport({ vscode, nativeMainPath: nativeMain,
+          opensshMainPath: opensshMain, root, isEnabled: () => !activationDisposed && config().enabled !== false, log }); }
+        catch { log('remote-support-unavailable'); }
+      }
+      if (nativeMain && remoteSupport && !acpInjection) {
+        try {
+          const installed = await require('./runtime/acp-injection.cjs').installAcpInjection({ nativeMainPath: nativeMain,
+            apiServerUrl: 'http://127.0.0.1:' + PORT, resolveRemoteServerUrl: remoteSupport.resolveRemoteServerUrl, log });
+          if (generation !== remoteGeneration || activationDisposed || config().enabled === false) installed.dispose(); else acpInjection = installed;
+        }
+        catch { log('acp-injection-unavailable'); }
+      }
+    })().finally(() => { remoteInstall = undefined; });
+    return remoteInstall;
+  };
+  stopRemoteSupport = () => { remoteGeneration++; acpInjection?.dispose(); acpInjection = undefined; remoteSupport?.dispose(); remoteSupport = undefined; };
+  if (config().enabled !== false) void startRemoteSupport();
   if (nativeMain) {
     try {
       nativePicker = require('./runtime/native-picker.cjs').installNativePicker({ nativeMainPath: nativeMain,
@@ -273,8 +305,9 @@ async function activate(context) {
     if (changed && !activationDisposed) try { void management?.publish()?.catch(() => {}); } catch {}
   };
   let hostCatalog;
-  if (nativeMain) try {
+  if (nativeMain || vscode.env?.remoteName) try {
     hostCatalog = require('./runtime/host-catalog.cjs').installHostCatalog({ nativeMainPath: nativeMain,
+      vscode, stateDbPath: path.join(path.dirname(root), 'state.vscdb'),
       getCatalog: catalog, onNativeModels: observeNativeModels,
       isEnabled: () => !activationDisposed && config().enabled !== false,
       executeCommand: command => vscode.commands.executeCommand(command), log });
@@ -290,6 +323,7 @@ async function activate(context) {
     return operation;
   };
   async function enable() {
+    await startRemoteSupport();
     const generation = ++activationGeneration;
     runtimeWaitAbort?.abort();
     const waiting = new AbortController(); runtimeWaitAbort = waiting;
@@ -336,6 +370,16 @@ async function activate(context) {
     await reconcilePreference();
     if (generation !== activationGeneration || config().enabled === false) return;
     const native = vscode.extensions.getExtension('codeium.windsurf');
+    if (!native && vscode.env?.remoteName) {
+      let remoteState = 'connecting';
+      connection = { get status() { return { state: remoteState, tunnels: remoteSupport?.status() || [] }; }, dispose() { remoteState = 'disposed'; } };
+      startNativeSync();
+      void hostCatalog?.refresh();
+      if (remoteSupport) void remoteSupport.ensureCurrentRemoteWindowTunnel().then(() => { if (remoteState !== 'disposed') remoteState = 'ready'; }, () => { if (remoteState !== 'disposed') { remoteState = 'unavailable'; log('remote-tunnel-unavailable'); } });
+      else remoteState = 'unavailable';
+      log('activated-remote');
+      return;
+    }
     if (!native) throw new Error('未找到 Devin 原生扩展');
     const injected = await installLsInjection({ nativeMainPath: path.resolve(native.extensionPath, native.packageJSON.main),
       createBridge: port => createLsBridge(port, { getCatalog: catalog, log, onNativeModels: observeNativeModels }), log });
@@ -485,7 +529,7 @@ async function activate(context) {
         if (config().goalEnabled !== true) { try { goalController?.suspend({ reason: 'disabled' }); } catch { log('goal-suspend-failed'); } }
       } else if (type === 'setAutoContinue' || type === 'setAutoContinueUntilPlanComplete') resetAutoContinue?.();
       else if (config().enabled !== false) { await ensureEnabled(); await reconcileSelection(); }
-      if (type === 'setHomeModels' || type === 'resetHomeModels') nativePicker?.markReloadNeeded();
+      if ((type === 'setHomeModels' || type === 'resetHomeModels') && !hostCatalog) nativePicker?.markReloadNeeded();
       else pickerRefresh.changed();
       await hostCatalog?.refresh();
     } });
@@ -567,6 +611,7 @@ async function teardown() {
   stopNativeSync?.(); stopNativeSync = undefined;
   activationGeneration++; runtimeWaitAbort?.abort(); reconcileHalted = true;
   if (connection) { const current = connection; connection = undefined; await current.dispose(); }
+  stopRemoteSupport?.();
 }
 async function deactivate() {
   activationDisposed = true;

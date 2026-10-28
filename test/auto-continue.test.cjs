@@ -1768,3 +1768,21 @@ for (const protocolVersion of [1, 2]) {
     assert.equal(f.logs.filter(log => log.event === 'auto-continue-scheduled').every(log => log.data.reason === 'error'), true);
   });
 }
+
+test('remote disconnect cancels pending retries and permits a new turn after reconnect', async () => {
+  const f = fixture(), scheduler = fakeScheduler(); f.api.updateConnection = () => 'updated';
+  const handle = f.install({ isEnabled: () => true, scheduler });
+  let resolve;
+  const remote = { id: 'ssh-one', agentId: 'devin-cli', bundled: true, location: { kind: 'ssh', alias: 'box' },
+    sendRequest() { return new Promise(done => { resolve = done; }); }, forwardClientRequest() {} };
+  f.api.registerConnection(remote);
+  const pending = remote.sendRequest({ method: 'session/prompt', params: { sessionId: 'one' } });
+  assert.equal(handle.status().activeSessions, 1);
+  assert.equal(f.api.updateConnection('ssh-one', { status: 'disconnected' }), 'updated');
+  assert.equal(handle.status().activeSessions, 0);
+  resolve({ stopReason: 'end_turn' }); await pending; scheduler.advance(10000);
+  assert.equal(handle.status().pendingTimers, 0);
+  const next = remote.sendRequest({ method: 'session/prompt', params: { sessionId: 'one' } });
+  assert.equal(handle.status().activeSessions, 1); resolve({ stopReason: 'end_turn' }); await next;
+  handle.dispose();
+});

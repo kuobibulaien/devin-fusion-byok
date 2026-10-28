@@ -287,6 +287,27 @@ function createManager({ read, write, discover = discoverModels, afterChange = a
         else config.hiddenNativeModelUids = list.filter(value => value !== uid);
         break;
       }
+      case 'setNativeModelsHidden': {
+        const uids = payload?.uids;
+        if (!Array.isArray(uids) || !uids.length || uids.length > 500 ||
+            uids.some(uid => typeof uid !== 'string' || !uid || uid.length > 256 || /^(?:fusion-)?dfbyok-/.test(uid))) fail('模型标识无效。');
+        const hidden = boolean(payload.hidden, '显示状态');
+        const observedUids = new Set(nativeModels().map(entry => entry?.uid).filter(Boolean));
+        if (hidden && uids.some(uid => !observedUids.has(uid))) fail('部分官方模型当前未出现在列表中，请刷新后重试。');
+        const seen = new Set(), list = [];
+        for (const value of Array.isArray(config.hiddenNativeModelUids) ? config.hiddenNativeModelUids : []) {
+          if (typeof value !== 'string' || !value || value.length > 256 || /^(?:fusion-)?dfbyok-/.test(value) || seen.has(value)) continue;
+          seen.add(value); list.push(value);
+        }
+        if (hidden) {
+          for (const uid of uids) if (!seen.has(uid)) { seen.add(uid); list.push(uid); }
+          config.hiddenNativeModelUids = list;
+        } else {
+          const remove = new Set(uids);
+          config.hiddenNativeModelUids = list.filter(value => !remove.has(value));
+        }
+        break;
+      }
       case 'setRoleModel': {
         const role = payload.role;
         if (role !== 'lead' && role !== 'sidekick') fail('角色类型无效。');

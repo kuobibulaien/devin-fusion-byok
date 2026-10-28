@@ -16,7 +16,7 @@ function officialServer(value) {
   if (typeof value !== 'string') return false;
   try {
     const url = new URL(value);
-    return url.origin === 'https://server.codeium.com' && url.pathname === '/' && !url.search && !url.hash && !url.username && !url.password;
+    return ['https://server.codeium.com', 'https://server.self-serve.windsurf.com'].includes(url.origin) && url.pathname === '/' && !url.search && !url.hash && !url.username && !url.password;
   } catch { return false; }
 }
 
@@ -31,7 +31,7 @@ function restore(target, key, wrapper, descriptor) {
  * official API-server address in its authenticate metadata. Existing connectors
  * are not publicly enumerable; install before registration or reload ACP once.
  */
-async function installAcpInjection({ nativeMainPath, apiServerUrl, log = () => {} } = {}) {
+async function installAcpInjection({ nativeMainPath, apiServerUrl, resolveRemoteServerUrl, log = () => {} } = {}) {
   const destination = localServer(apiServerUrl);
   const nativeRequire = createRequire(nativeMainPath);
   const api = nativeRequire('vscode').windsurfAcp;
@@ -55,15 +55,29 @@ async function installAcpInjection({ nativeMainPath, apiServerUrl, log = () => {
     connections.delete(connector);
   }
   function attach(connector) {
+    const remote = ['ssh', 'wsl'].includes(connector?.location?.kind);
     if (disposed || !connector || connector.agentId !== 'devin-cli' || connector.bundled !== true ||
-        connector.location?.kind !== 'local' || typeof connector.sendHandshakeRequest !== 'function') return null;
+        (connector.location?.kind !== 'local' && !(remote && typeof resolveRemoteServerUrl === 'function')) || typeof connector.sendHandshakeRequest !== 'function') return null;
     if (connections.has(connector)) return connections.get(connector);
     const originalHandshake = connector.sendHandshakeRequest;
-    const entry = { active: true, handshakeDescriptor: Object.getOwnPropertyDescriptor(connector, 'sendHandshakeRequest') };
+    const entry = { active: true, lastRemoteUrl: null, handshakeDescriptor: Object.getOwnPropertyDescriptor(connector, 'sendHandshakeRequest') };
     entry.handshake = function (...args) {
       const request = args[0];
       if (!disposed && entry.active && request?.method === 'authenticate' && request.params?.methodId === 'windsurf-api-key' &&
-          officialServer(request.params?._meta?.api_server_url)) {
+          (officialServer(request.params?._meta?.api_server_url) || (remote && entry.lastRemoteUrl !== null && request.params?._meta?.api_server_url === entry.lastRemoteUrl))) {
+        if (remote) {
+          const receiver = this;
+          return Promise.resolve().then(() => resolveRemoteServerUrl(connector.location)).then(value => {
+            const target = localServer(value);
+            if (disposed || !entry.active) throw new Error('ACP remote injection disposed');
+            entry.lastRemoteUrl = target;
+            const changed = { ...request, params: { ...request.params,
+              _meta: { ...request.params._meta, api_server_url: target } } };
+            rewritten++;
+            report('acp authentication server redirected');
+            return Reflect.apply(originalHandshake, receiver, [changed, ...args.slice(1)]);
+          });
+        }
         // Preserve credential fields and any future metadata by shallow copy;
         // their values are never interpreted, stringified, or logged here.
         const changed = { ...request, params: { ...request.params,

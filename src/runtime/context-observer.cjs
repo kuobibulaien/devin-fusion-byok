@@ -7,6 +7,7 @@ function installContextObserver({ nativeMainPath, isEnabled = () => true }) {
   if (!api || typeof api.registerConnection !== 'function') throw new Error('ACP unavailable');
   if (api[KEY]) return api[KEY];
   const original = api.registerConnection, descriptor = Object.getOwnPropertyDescriptor(api, 'registerConnection');
+  const originalUpdate = api.updateConnection, updateDescriptor = Object.getOwnPropertyDescriptor(api, 'updateConnection');
   const connections = new Map();
   let disposed = false, registrations = 0, sessionUpdates = 0, usageUpdates = 0, acceptedUsageUpdates = 0, rejectedUsageUpdates = 0;
   const usageRejections = { 'invalid-session-id': 0, 'invalid-used': 0, 'invalid-size': 0, 'invalid-parent-id': 0, 'invalid-run-id': 0 };
@@ -17,10 +18,11 @@ function installContextObserver({ nativeMainPath, isEnabled = () => true }) {
   }
   function enabled() { return !disposed && isEnabled(); }
   function attach(connector) {
-    if (connections.size >= 32 || connections.has(connector) || connector?.agentId !== 'devin-cli' || connector.bundled !== true || connector.location?.kind !== 'local' ||
+    if (connections.size >= 32 || connections.has(connector) || connector?.agentId !== 'devin-cli' || connector.bundled !== true || !['local', 'ssh', 'wsl'].includes(connector.location?.kind) ||
         typeof connector.sendRequest !== 'function' || typeof connector.forwardClientRequest !== 'function') return;
     const state = createContextState(), saved = [];
-    const entry = { state, active: true, saved };
+    const entry = { state, active: true, saved, epoch: 0 };
+    const disconnect = () => { entry.epoch++; state.clear(); };
     function wrap(key, factory) {
       const previous = Object.getOwnPropertyDescriptor(connector, key), fn = connector[key];
       const wrapper = factory(fn);
@@ -32,10 +34,12 @@ function installContextObserver({ nativeMainPath, isEnabled = () => true }) {
     function detach() {
       entry.active = false; state.clear();
       for (const value of saved.reverse()) restore(connector, value.key, value.wrapper, value.previous);
+      if (entry.registration) restore(entry.registration, 'dispose', entry.disposeWrapper, entry.disposeDescriptor);
       connections.delete(connector);
     }
     try {
       wrap('sendRequest', fn => function (...args) {
+        const epoch = entry.epoch;
         let method, sessionId, generation;
         safe(() => {
           method = args[0]?.method;
@@ -48,11 +52,12 @@ function installContextObserver({ nativeMainPath, isEnabled = () => true }) {
         try { result = Reflect.apply(fn, this, args); }
         catch (error) { safe(() => { if (method === 'session/prompt') state.finish(sessionId, generation, 'error'); }); throw error; }
         const success = value => safe(() => {
+          if (epoch !== entry.epoch) return;
           if (method === 'session/prompt' && !(connector.protocolVersion >= 2)) state.finish(sessionId, generation);
           if (method === 'session/cancel') state.finish(sessionId, undefined, 'cancelled');
           if (['session/new', 'session/load', 'session/resume', 'session/set_config_option'].includes(method)) state.selectModel(value?.sessionId || sessionId, value?.configOptions);
         });
-        const failure = () => safe(() => { if (method === 'session/prompt') state.finish(sessionId, generation, 'error'); });
+        const failure = () => safe(() => { if (epoch === entry.epoch && method === 'session/prompt') state.finish(sessionId, generation, 'error'); });
         if (result && typeof result.then === 'function') result.then(success, failure); else success(result);
         return result;
       });
@@ -78,15 +83,35 @@ function installContextObserver({ nativeMainPath, isEnabled = () => true }) {
       });
       if (typeof connector.setStatus === 'function') wrap('setStatus', fn => function (status, ...rest) {
         const result = Reflect.apply(fn, this, [status, ...rest]);
-        if (['disconnected', 'disabled', 'disposed'].includes(status)) detach();
+        if (['disconnected', 'disabled', 'disposed'].includes(status)) {
+          if (connector.location.kind !== 'local' && status === 'disconnected') disconnect(); else detach();
+        }
         return result;
       });
-      connections.set(connector, { ...entry, detach });
+      entry.detach = detach; entry.disconnect = disconnect; connections.set(connector, entry);
     } catch { detach(); }
   }
   function register(...args) {
     const result = Reflect.apply(original, this, args);
-    if (!disposed) { registrations++; try { attach(args[0]); } catch {} }
+    if (!disposed) {
+      registrations++; try {
+        attach(args[0]);
+        const entry = connections.get(args[0]);
+        if (entry && !entry.registration && typeof result?.dispose === 'function') {
+          const originalDispose = result.dispose;
+          entry.registration = result; entry.disposeDescriptor = Object.getOwnPropertyDescriptor(result, 'dispose');
+          entry.disposeWrapper = function (...rest) { entry.detach(); return Reflect.apply(originalDispose, this, rest); };
+          result.dispose = entry.disposeWrapper;
+        }
+      } catch {}
+    }
+    return result;
+  }
+  function updateConnection(target, update, ...rest) {
+    const result = Reflect.apply(originalUpdate, this, [target, update, ...rest]);
+    if (!disposed && update?.status === 'disconnected') for (const [connector, entry] of connections) {
+      if (connector.location?.kind !== 'local' && (target === connector || target === connector.id)) entry.disconnect();
+    }
     return result;
   }
   const handle = {
@@ -102,11 +127,13 @@ function installContextObserver({ nativeMainPath, isEnabled = () => true }) {
       if (disposed) return;
       disposed = true;
       restore(api, 'registerConnection', register, descriptor);
+      if (typeof originalUpdate === 'function') restore(api, 'updateConnection', updateConnection, updateDescriptor);
       for (const entry of [...connections.values()]) entry.detach();
       if (api[KEY] === handle) delete api[KEY];
     },
   };
   api.registerConnection = register;
+  if (typeof originalUpdate === 'function') api.updateConnection = updateConnection;
   Object.defineProperty(api, KEY, { value: handle, configurable: true });
   return handle;
 }

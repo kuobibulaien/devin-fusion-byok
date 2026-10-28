@@ -93,3 +93,18 @@ test('installation is idempotent, reversible, and an older API is supported', ()
   assert.notEqual(f.install(), handle);
   const old = fixture(); delete old.api.setAuthStatus; assert.equal(old.install(), null);
 });
+
+test('remote mode publishes only a valid latest login and restores native models on disable', async () => {
+  const { installHostCatalog } = require('../src/runtime/host-catalog.cjs');
+  const { status, catalog } = data(), sent = []; let enabled = true, current = status;
+  class Database { constructor(_path, options) { assert.equal(options.readOnly, true); } prepare() { return { get: () => ({ value: JSON.stringify(current) }) }; } close() {} }
+  const handle = installHostCatalog({ vscode: { windsurfAuth: { setAuthStatus: value => { sent.push(value); } } },
+    stateDbPath: '/unused', database: Database, getCatalog: () => catalog, isEnabled: () => enabled });
+  await handle.refresh(); assert.notDeepEqual(sent[0], status);
+  current = sent[0]; enabled = false; await handle.refresh();
+  const raw = Buffer.from(sent[1].userStatusProtoBinaryBase64, 'base64');
+  const configs = wire.fields(wire.fields(raw, 33)[0].value, 1);
+  assert.equal(configs.length, 1); assert.equal(wire.str(configs[0].value, 22), 'official-locked');
+  current = {}; await handle.refresh(); assert.equal(sent.length, 2);
+  handle.dispose();
+});

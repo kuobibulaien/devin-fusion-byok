@@ -581,3 +581,20 @@ test('native first-page editing exposes grey pins and never changes provider set
   assert.equal(f.writes.length, 0);
   assert.ok(state.nativeModels.every(item => item.disabled));
 });
+
+test('batch native visibility hides disabled or all official models atomically and rejects invalid payloads', async () => {
+  const observed = [
+    { uid: 'swe-1.6-slow', label: 'SWE-1.6 Slow', disabled: false },
+    { uid: 'swe-2-high', label: 'SWE-2 High', disabled: true },
+    { uid: 'swe-2-max', label: 'SWE-2 Max', disabled: true },
+  ];
+  const f = memory({ nativeModels: () => observed });
+  let state = await f.manager.dispatch('setNativeModelsHidden', { uids: ['swe-2-high', 'swe-2-max'], hidden: true });
+  assert.deepEqual(f.read().hiddenNativeModelUids, ['swe-2-high', 'swe-2-max']);
+  assert.deepEqual(state.nativeModels.filter(m => m.hidden).map(m => m.uid), ['swe-2-high', 'swe-2-max']);
+  state = await f.manager.dispatch('setNativeModelsHidden', { uids: ['swe-2-high', 'swe-2-max'], hidden: false });
+  assert.deepEqual(f.read().hiddenNativeModelUids, []);
+  for (const bad of [{ uids: [], hidden: true }, { uids: ['unseen'], hidden: true }, { uids: ['dfbyok-own'], hidden: true }, { uids: ['swe-2-high'], hidden: 'yes' }]) {
+    await assert.rejects(f.manager.dispatch('setNativeModelsHidden', bad), PanelInputError);
+  }
+});
