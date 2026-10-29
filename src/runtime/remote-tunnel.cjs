@@ -134,30 +134,54 @@ function createRemoteTunnelManager({ workspace, vscode, root, port = 39842, isEn
   };
 }
 function installRemoteSupport({ vscode, nativeMainPath, opensshMainPath, wslMainPath, root, port = 39842, isEnabled = () => true, log = () => {} }) {
-  const apiPath = opensshMainPath || wslMainPath || nativeMainPath;
-  if (!apiPath) throw new Error('remote_api_unavailable');
-  const workspace = createRequire(apiPath)('vscode').workspace;
-  const manager = createRemoteTunnelManager({ workspace, vscode, root, port, isEnabled, log });
+  const report = (event, error) => { try { log(event, { detail: error instanceof Error ? error.message : String(error) }); } catch {} };
   const restores = [];
   function wrap(obj, key, make) { const original = obj?.[key]; if (typeof original !== 'function') return; const descriptor = Object.getOwnPropertyDescriptor(obj, key), wrapper = make(original); obj[key] = wrapper; restores.push(() => { if (obj[key] === wrapper) { if (descriptor) Object.defineProperty(obj, key, descriptor); else delete obj[key]; } }); }
+  // Independent of the tunnel manager: -R on new SSH processes is the path that
+  // works when the host's exec-server RPC or proposed APIs are unavailable.
+  let sshForward = false;
   if (opensshMainPath) {
-    const child = createRequire(opensshMainPath)('child_process');
-    wrap(child, 'spawn', original => function (command, args, options, ...rest) {
-      const env = options?.env || {};
-      if (isEnabled() && (env.SSH_ASKPASS || Object.keys(env).some(key => key.startsWith('WINDSURF_SSH_ASKPASS_')))) args = injectSshRemoteForwardArgs(args, port);
-      return Reflect.apply(original, this, [command, args, options, ...rest]);
-    });
+    try {
+      // Same builtin instance the remote-openssh extension spawns ssh with; it
+      // does not need to be resolved through the extension's own module scope.
+      const child = require('node:child_process');
+      wrap(child, 'spawn', original => function (command, args, options, ...rest) {
+        const env = options?.env || {};
+        if (isEnabled() && (env.SSH_ASKPASS || Object.keys(env).some(key => key.startsWith('WINDSURF_SSH_ASKPASS_')))) args = injectSshRemoteForwardArgs(args, port);
+        return Reflect.apply(original, this, [command, args, options, ...rest]);
+      });
+      sshForward = true;
+    } catch (error) { report('remote-ssh-forward-unavailable', error); }
   }
-  const workspaces = new Set([workspace]);
-  if (wslMainPath) workspaces.add(createRequire(wslMainPath)('vscode').workspace);
-  for (const targetWorkspace of workspaces) wrap(targetWorkspace, 'registerRemoteAuthorityResolver', original => function (prefix, resolver, ...rest) {
-    if (['ssh-remote', 'wsl'].includes(prefix) && typeof resolver?.resolve === 'function') {
-      const proxy = Object.create(resolver), resolve = resolver.resolve;
-      proxy.resolve = async function (authority, ...args) { const result = await Reflect.apply(resolve, resolver, [authority, ...args]); manager.recordResolvedAuthority(authority); if (isEnabled()) void manager.ensureTunnel(authority, { strictPort: true }).catch(() => { try { log('remote-tunnel-unavailable'); } catch {} }); return result; };
-      resolver = proxy;
-    }
-    return Reflect.apply(original, this, [prefix, resolver, ...rest]);
-  });
-  return { ...manager, dispose() { manager.dispose(); for (const restore of restores.reverse()) restore(); } };
+  let manager, tunnel = false;
+  try {
+    const apiPath = opensshMainPath || wslMainPath || nativeMainPath;
+    if (!apiPath) throw new Error('remote_api_unavailable');
+    const workspace = createRequire(apiPath)('vscode').workspace;
+    manager = createRemoteTunnelManager({ workspace, vscode, root, port, isEnabled, log });
+    tunnel = true;
+    const workspaces = new Set([workspace]);
+    if (wslMainPath) workspaces.add(createRequire(wslMainPath)('vscode').workspace);
+    for (const targetWorkspace of workspaces) wrap(targetWorkspace, 'registerRemoteAuthorityResolver', original => function (prefix, resolver, ...rest) {
+      if (['ssh-remote', 'wsl'].includes(prefix) && typeof resolver?.resolve === 'function') {
+        const proxy = Object.create(resolver), resolve = resolver.resolve;
+        proxy.resolve = async function (authority, ...args) { const result = await Reflect.apply(resolve, resolver, [authority, ...args]); manager.recordResolvedAuthority(authority); if (isEnabled()) void manager.ensureTunnel(authority, { strictPort: true }).catch(() => { try { log('remote-tunnel-unavailable'); } catch {} }); return result; };
+        resolver = proxy;
+      }
+      return Reflect.apply(original, this, [prefix, resolver, ...rest]);
+    });
+  } catch (error) {
+    report('remote-exec-unavailable', error);
+    manager = {
+      ensureTunnel: () => Promise.reject(new Error('remote_exec_unavailable')),
+      resolveRemoteServerUrl: () => Promise.reject(new Error('remote_exec_unavailable')),
+      // With -R installed the port is reachable once the SSH connection is up.
+      ensureCurrentRemoteWindowTunnel: () => sshForward ? Promise.resolve(port) : Promise.reject(new Error('remote_exec_unavailable')),
+      recordResolvedAuthority() {},
+      status: () => [],
+      dispose() {},
+    };
+  }
+  return { ...manager, sshForward, tunnel, dispose() { manager.dispose(); for (const restore of restores.reverse()) restore(); } };
 }
 module.exports = { locationToAuthority, injectSshRemoteForwardArgs, createRemoteTunnelManager, installRemoteSupport, remoteProgram };
