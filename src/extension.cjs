@@ -40,6 +40,7 @@ const RUNTIME_ERRORS = {
   newer_runtime: '另一窗口已加载更新版插件，请重新加载当前窗口。',
   control_unavailable: '无法验证本地连接服务的归属，请重新加载窗口后重试。',
   startup_failed: '本地连接服务启动失败，请查看状态日志。',
+  remote_support_unavailable: '当前远程窗口无法建立到本机连接服务的隧道，已恢复 Devin 原生连接设置。请在本机启用插件后重新连接远程窗口。',
   cancelled: '操作已取消。',
 };
 class RuntimeError extends Error {
@@ -180,7 +181,7 @@ async function activate(context) {
       if (!remoteSupport && (opensshMain || wslMain || nativeMain)) {
         try { remoteSupport = require('./runtime/remote-tunnel.cjs').installRemoteSupport({ vscode, nativeMainPath: nativeMain,
           opensshMainPath: opensshMain, wslMainPath: wslMain, root, isEnabled: () => !activationDisposed && config().enabled !== false, log }); }
-        catch { log('remote-support-unavailable'); }
+        catch (error) { log('remote-support-unavailable', { detail: error instanceof Error ? error.message : String(error) }); }
       }
       if (nativeMain && remoteSupport && !acpInjection) {
         try {
@@ -332,6 +333,18 @@ async function activate(context) {
   };
   async function enable() {
     await startRemoteSupport();
+    const native = vscode.extensions.getExtension('codeium.windsurf');
+    // Without the native extension the CLI runs on the SSH/WSL host, so the
+    // loopback redirect only works through -R or the exec-server tunnel. If
+    // neither is available, keep the official URL instead of stranding the
+    // remote agent on an unreachable port.
+    if (!native && vscode.env?.remoteName &&
+        (!remoteSupport || (remoteSupport.sshForward === false && remoteSupport.tunnel === false))) {
+      log('remote-support-unavailable');
+      try { await restoreOwnedSettings(); log('settings-restored', { reason: 'remote-support-unavailable' }); }
+      catch { log('settings-restore-failed'); }
+      throw new RuntimeError('remote_support_unavailable');
+    }
     const generation = ++activationGeneration;
     runtimeWaitAbort?.abort();
     const waiting = new AbortController(); runtimeWaitAbort = waiting;
@@ -377,7 +390,6 @@ async function activate(context) {
     if (generation !== activationGeneration || config().enabled === false) return;
     await reconcilePreference();
     if (generation !== activationGeneration || config().enabled === false) return;
-    const native = vscode.extensions.getExtension('codeium.windsurf');
     if (!native && vscode.env?.remoteName) {
       let remoteState = 'connecting';
       connection = { get status() { return { state: remoteState, tunnels: remoteSupport?.status() || [] }; }, dispose() { remoteState = 'disposed'; } };

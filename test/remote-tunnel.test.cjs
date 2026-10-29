@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const { spawn } = require('node:child_process');
-const { locationToAuthority, injectSshRemoteForwardArgs, createRemoteTunnelManager } = require('../src/runtime/remote-tunnel.cjs');
+const { locationToAuthority, injectSshRemoteForwardArgs, createRemoteTunnelManager, installRemoteSupport } = require('../src/runtime/remote-tunnel.cjs');
 function adapter(command, args) {
   const proc = spawn(command, args, { env: { ...process.env, VSCODE_CLI_EXE: '/nonexistent/windsurf-cli-test' } });
   function stream(source) { return { onDidReceiveMessage(fn) { source.on('data', fn); return { dispose: () => source.off('data', fn) }; } }; }
@@ -57,7 +57,7 @@ test('SSH spawn and resolver wrappers are scoped, reversible and do not wait for
     getRemoteExecServer() { throw new Error('not ready'); } };
   const source = fs.readFileSync(require.resolve('../src/runtime/remote-tunnel.cjs'), 'utf8');
   vm.runInNewContext(source, { module, Buffer, URL, setTimeout, clearTimeout, process,
-    require(name) { if (name === 'node:module') return { createRequire: () => key => key === 'vscode' ? { workspace } : child }; return require(name); } });
+    require(name) { if (name === 'node:module') return { createRequire: () => key => key === 'vscode' ? { workspace } : child }; if (name === 'node:child_process') return child; return require(name); } });
   const originalSpawn = child.spawn, originalRegister = workspace.registerRemoteAuthorityResolver;
   const handle = module.exports.installRemoteSupport({ vscode: { workspace: {} }, opensshMainPath: '/ssh/main.js', root: '/missing' });
   const args = ['-v', '-T', '-D', '1234'];
@@ -67,6 +67,19 @@ test('SSH spawn and resolver wrappers are scoped, reversible and do not wait for
   assert.equal(workspace.registerRemoteAuthorityResolver('ssh-remote', resolver), 'registered');
   assert.equal(await registrations[0].resolver.resolve('ssh-remote+host'), 'resolved');
   handle.dispose(); assert.equal(child.spawn, originalSpawn); assert.equal(workspace.registerRemoteAuthorityResolver, originalRegister);
+});
+
+test('SSH -R injection is installed even when the proposed vscode API is unavailable', async () => {
+  const logs = [];
+  const handle = installRemoteSupport({ vscode: { workspace: {} },
+    opensshMainPath: path.join(os.tmpdir(), 'missing-extension', 'dist', 'extension'),
+    root: os.tmpdir(), log: (event, data) => logs.push([event, data]) });
+  try {
+    assert.equal(handle.sshForward, true);
+    assert.equal(handle.tunnel, false);
+    assert.equal(await handle.ensureCurrentRemoteWindowTunnel(), 39842);
+    assert.ok(logs.some(([event]) => event === 'remote-exec-unavailable'));
+  } finally { handle.dispose(); }
 });
 
 test('WSL resolver fallback handles empty windows, CRLF and direct reprobes', async t => {
@@ -82,7 +95,7 @@ test('WSL resolver fallback handles empty windows, CRLF and direct reprobes', as
   const ssh = makeWorkspace(), wsl = makeWorkspace(), sshOriginal = ssh.registerRemoteAuthorityResolver, wslOriginal = wsl.registerRemoteAuthorityResolver;
   const child = { spawn() {} }, source = fs.readFileSync(require.resolve('../src/runtime/remote-tunnel.cjs'), 'utf8');
   vm.runInNewContext(source, { module, Buffer, URL, setTimeout, clearTimeout, process,
-    require(name) { if (name === 'node:module') return { createRequire: file => key => key === 'vscode' ? { workspace: file === '/wsl' ? wsl : ssh } : child }; return require(name); } });
+    require(name) { if (name === 'node:module') return { createRequire: file => key => key === 'vscode' ? { workspace: file === '/wsl' ? wsl : ssh } : child }; if (name === 'node:child_process') return child; return require(name); } });
   const handle = module.exports.installRemoteSupport({ vscode: { workspace: {} }, opensshMainPath: '/ssh', wslMainPath: '/wsl', root });
   wsl.registerRemoteAuthorityResolver('wsl', { async resolve() { return 'ok'; } });
   assert.equal(await registrations[0].resolver.resolve('wsl+Debian'), 'ok');

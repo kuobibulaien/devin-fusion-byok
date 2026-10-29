@@ -79,9 +79,12 @@ function fixture(t, initial = {}) {
     } },
   };
   let remoteDisposed = 0, remoteEnsured = 0;
-  if (initial.remote) overrides['./runtime/remote-tunnel.cjs'] = { installRemoteSupport: () => ({
+  if (initial.remote) overrides['./runtime/remote-tunnel.cjs'] = { installRemoteSupport: () => initial.deadTunnel ? ({
+    ensureCurrentRemoteWindowTunnel: async () => { throw new Error('remote_exec_unavailable'); }, status: () => [],
+    sshForward: false, tunnel: false, dispose: () => { remoteDisposed++; },
+  }) : ({
     ensureCurrentRemoteWindowTunnel: async () => { remoteEnsured++; return 39842; }, status: () => [],
-    dispose: () => { remoteDisposed++; },
+    sshForward: true, tunnel: true, dispose: () => { remoteDisposed++; },
   }) };
   const module = { exports: {} };
   vm.runInNewContext(fs.readFileSync(filename, 'utf8'), { module, exports: module.exports, process,
@@ -109,6 +112,15 @@ test('remote window starts a tunnel and disables its own lifecycle without nativ
   await f.commands.get('devinFusionByok.disable')();
   assert.equal(f.remoteCounts().remoteDisposed, 1);
   assert.equal(f.globals.agentEnv['devin-cli'].WINDSURF_API_SERVER_URL, undefined);
+});
+test('remote window without a working tunnel restores a stale loopback redirect', async t => {
+  const f = fixture(t, { remote: true, deadTunnel: true,
+    globals: { agentEnv: { 'devin-cli': { WINDSURF_API_SERVER_URL: 'http://127.0.0.1:39842', KEEP: 'user-value' } } },
+    state: { managedEnv: { WINDSURF_API_SERVER_URL: 'http://127.0.0.1:39842' }, savedEnv: { WINDSURF_API_SERVER_URL: null } } });
+  await f.activate(f.context); await f.settle();
+  assert.equal(f.globals.agentEnv['devin-cli'].WINDSURF_API_SERVER_URL, undefined);
+  assert.equal(f.globals.agentEnv['devin-cli'].KEEP, 'user-value');
+  assert.ok(f.notices.some(text => text.includes('无法建立到本机连接服务的隧道')));
 });
 test('activation and home edits refresh the host catalog, and disabled/unloaded hooks stop injecting', async t => {
   const f = fixture(t); await f.activate(f.context);
